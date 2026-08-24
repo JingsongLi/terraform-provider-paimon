@@ -19,6 +19,7 @@ package client
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -185,6 +186,31 @@ func encodeDataType(input string, nextFieldID *int) (any, error) {
 	}
 }
 
+// EquivalentDataTypes reports whether two SQL spellings encode to the same
+// language-neutral Paimon REST data type.
+func EquivalentDataTypes(left, right DataType) bool {
+	canonicalLeft, err := canonicalDataType(left)
+	if err != nil {
+		return false
+	}
+	canonicalRight, err := canonicalDataType(right)
+
+	return err == nil && canonicalLeft == canonicalRight
+}
+
+func canonicalDataType(value DataType) (DataType, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	var canonical DataType
+	if err := json.Unmarshal(encoded, &canonical); err != nil {
+		return "", err
+	}
+
+	return canonical, nil
+}
+
 func stripNotNull(input string) (string, bool) {
 	trimmed := strings.TrimSpace(input)
 	const suffix = " NOT NULL"
@@ -225,9 +251,13 @@ func compositeTypeParts(input string) (string, string, bool, error) {
 func matchingAngleBracket(input string, opening int) (int, error) {
 	depth := 0
 	parenDepth, squareDepth, braceDepth := 0, 0, 0
+	defaultAtDepth := make(map[int]bool)
 	inString := false
 	inIdentifier := false
 	for index := opening; index < len(input); index++ {
+		if !inString && !inIdentifier && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 && hasKeywordAt(input, index, "DEFAULT") {
+			defaultAtDepth[depth] = true
+		}
 		switch input[index] {
 		case '\'':
 			if inIdentifier {
@@ -250,17 +280,18 @@ func matchingAngleBracket(input string, opening int) (int, error) {
 			}
 			inIdentifier = !inIdentifier
 		case '<':
-			if !inString && !inIdentifier && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 {
+			if !inString && !inIdentifier && !defaultAtDepth[depth] && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 && isCompositeAngleOpening(input, index) {
 				depth++
 			}
 		case '>':
-			if !inString && !inIdentifier && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 {
+			if !inString && !inIdentifier && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 && isStructuralAngleClosing(input, index) {
+				delete(defaultAtDepth, depth)
 				depth--
 				if depth == 0 {
 					return index, nil
 				}
 				if depth < 0 {
-					return -1, fmt.Errorf("unexpected closing angle bracket")
+					return -1, errors.New("unexpected closing angle bracket")
 				}
 			}
 		case '(':
@@ -287,26 +318,34 @@ func matchingAngleBracket(input string, opening int) (int, error) {
 			if !inString && !inIdentifier {
 				braceDepth--
 			}
+		case ',':
+			if !inString && !inIdentifier && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 {
+				delete(defaultAtDepth, depth)
+			}
 		}
 		if parenDepth < 0 || squareDepth < 0 || braceDepth < 0 {
-			return -1, fmt.Errorf("unbalanced delimiters")
+			return -1, errors.New("unbalanced delimiters")
 		}
 	}
 	if inString || inIdentifier || parenDepth != 0 || squareDepth != 0 || braceDepth != 0 {
-		return -1, fmt.Errorf("unbalanced delimiters or quotes")
+		return -1, errors.New("unbalanced delimiters or quotes")
 	}
 
-	return -1, fmt.Errorf("missing closing angle bracket")
+	return -1, errors.New("missing closing angle bracket")
 }
 
 func splitTopLevel(input string, separator byte) ([]string, error) {
 	parts := make([]string, 0, 2)
 	start := 0
 	angleDepth, parenDepth, squareDepth, braceDepth := 0, 0, 0, 0
+	defaultAtDepth := make(map[int]bool)
 	inString := false
 	inIdentifier := false
 	for index := 0; index < len(input); index++ {
 		character := input[index]
+		if !inString && !inIdentifier && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 && hasKeywordAt(input, index, "DEFAULT") {
+			defaultAtDepth[angleDepth] = true
+		}
 		switch character {
 		case '\'':
 			if inIdentifier {
@@ -329,11 +368,12 @@ func splitTopLevel(input string, separator byte) ([]string, error) {
 			}
 			inIdentifier = !inIdentifier
 		case '<':
-			if !inString && !inIdentifier && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 {
+			if !inString && !inIdentifier && !defaultAtDepth[angleDepth] && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 && isCompositeAngleOpening(input, index) {
 				angleDepth++
 			}
 		case '>':
-			if !inString && !inIdentifier && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 {
+			if !inString && !inIdentifier && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 && isStructuralAngleClosing(input, index) {
+				delete(defaultAtDepth, angleDepth)
 				angleDepth--
 			}
 		case '(':
@@ -360,18 +400,18 @@ func splitTopLevel(input string, separator byte) ([]string, error) {
 			if !inString && !inIdentifier {
 				braceDepth--
 			}
-		default:
-			if character == separator && !inString && !inIdentifier && angleDepth == 0 && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 {
-				parts = append(parts, strings.TrimSpace(input[start:index]))
-				start = index + 1
-			}
 		}
 		if angleDepth < 0 || parenDepth < 0 || squareDepth < 0 || braceDepth < 0 {
-			return nil, fmt.Errorf("unbalanced delimiters")
+			return nil, errors.New("unbalanced delimiters")
+		}
+		if character == separator && !inString && !inIdentifier && angleDepth == 0 && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 {
+			delete(defaultAtDepth, angleDepth)
+			parts = append(parts, strings.TrimSpace(input[start:index]))
+			start = index + 1
 		}
 	}
 	if inString || inIdentifier || angleDepth != 0 || parenDepth != 0 || squareDepth != 0 || braceDepth != 0 {
-		return nil, fmt.Errorf("unbalanced delimiters or quotes")
+		return nil, errors.New("unbalanced delimiters or quotes")
 	}
 	parts = append(parts, strings.TrimSpace(input[start:]))
 
@@ -381,7 +421,7 @@ func splitTopLevel(input string, separator byte) ([]string, error) {
 func parseRowField(input string) (string, string, *string, *string, error) {
 	trimmed := strings.TrimSpace(input)
 	if trimmed == "" {
-		return "", "", nil, nil, fmt.Errorf("empty field declaration")
+		return "", "", nil, nil, errors.New("empty field declaration")
 	}
 
 	name, remainder, err := consumeRowFieldName(trimmed)
@@ -437,7 +477,7 @@ func consumeRowFieldName(input string) (string, string, error) {
 	if input[0] != '`' {
 		index := strings.IndexFunc(input, unicode.IsSpace)
 		if index <= 0 {
-			return "", "", fmt.Errorf("expected a field name followed by a type")
+			return "", "", errors.New("expected a field name followed by a type")
 		}
 
 		return input[:index], input[index:], nil
@@ -457,13 +497,13 @@ func consumeRowFieldName(input string) (string, string, error) {
 			continue
 		}
 		if index+1 < len(input) && !unicode.IsSpace(rune(input[index+1])) {
-			return "", "", fmt.Errorf("expected whitespace after quoted field name")
+			return "", "", errors.New("expected whitespace after quoted field name")
 		}
 
 		return name.String(), input[index+1:], nil
 	}
 
-	return "", "", fmt.Errorf("unterminated quoted field name")
+	return "", "", errors.New("unterminated quoted field name")
 }
 
 func findTopLevelKeyword(input, keyword string) int {
@@ -493,11 +533,11 @@ func findTopLevelKeyword(input, keyword string) int {
 			}
 			inIdentifier = !inIdentifier
 		case '<':
-			if !inString && !inIdentifier && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 {
+			if !inString && !inIdentifier && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 && isCompositeAngleOpening(input, index) {
 				angleDepth++
 			}
 		case '>':
-			if !inString && !inIdentifier && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 {
+			if !inString && !inIdentifier && parenDepth == 0 && squareDepth == 0 && braceDepth == 0 && isStructuralAngleClosing(input, index) {
 				angleDepth--
 			}
 		case '(':
@@ -534,6 +574,50 @@ func findTopLevelKeyword(input, keyword string) int {
 	return -1
 }
 
+func isCompositeAngleOpening(input string, index int) bool {
+	if index < 0 || index >= len(input) || input[index] != '<' {
+		return false
+	}
+	end := index
+	for end > 0 && unicode.IsSpace(rune(input[end-1])) {
+		end--
+	}
+	start := end
+	for start > 0 {
+		character := input[start-1]
+		if character != '_' && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') {
+			break
+		}
+		start--
+	}
+
+	switch strings.ToUpper(input[start:end]) {
+	case "ARRAY", "MAP", "MULTISET", "ROW", "VECTOR":
+		return true
+	default:
+		return false
+	}
+}
+
+func isStructuralAngleClosing(input string, index int) bool {
+	if index < 0 || index >= len(input) || input[index] != '>' {
+		return false
+	}
+	next := index + 1
+	for next < len(input) && unicode.IsSpace(rune(input[next])) {
+		next++
+	}
+	if next == len(input) {
+		return true
+	}
+	switch input[next] {
+	case ',', '>', ')', ']', '}':
+		return true
+	}
+
+	return hasKeywordAt(input, next, "NOT") || hasKeywordAt(input, next, "COMMENT") || hasKeywordAt(input, next, "DEFAULT")
+}
+
 func hasKeywordAt(input string, index int, keyword string) bool {
 	if index+len(keyword) > len(input) || !strings.EqualFold(input[index:index+len(keyword)], keyword) {
 		return false
@@ -549,7 +633,7 @@ func hasKeywordAt(input string, index int, keyword string) bool {
 func decodeSQLString(input string) (string, error) {
 	trimmed := strings.TrimSpace(input)
 	if len(trimmed) < 2 || trimmed[0] != '\'' || trimmed[len(trimmed)-1] != '\'' {
-		return "", fmt.Errorf("expected a single-quoted string")
+		return "", errors.New("expected a single-quoted string")
 	}
 	contents := trimmed[1 : len(trimmed)-1]
 	for index := 0; index < len(contents); index++ {
@@ -557,7 +641,7 @@ func decodeSQLString(input string) (string, error) {
 			continue
 		}
 		if index+1 >= len(contents) || contents[index+1] != '\'' {
-			return "", fmt.Errorf("unescaped single quote")
+			return "", errors.New("unescaped single quote")
 		}
 		index++
 	}

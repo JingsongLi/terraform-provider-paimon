@@ -320,7 +320,6 @@ func (c *Client) doRaw(ctx context.Context, method string, segments []string, qu
 	}
 
 	if result == nil || response.StatusCode == http.StatusNoContent {
-
 		return nil
 	}
 	if err := json.Unmarshal(contents, result); err != nil {

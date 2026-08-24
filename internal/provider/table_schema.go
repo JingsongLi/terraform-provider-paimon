@@ -319,6 +319,38 @@ func validateKeyFields(attribute string, keys []string, fields map[string]struct
 }
 
 func fieldsValueFromRemote(ctx context.Context, fields []client.Field, diags *diag.Diagnostics) types.List {
+	return fieldsValueFromModels(ctx, fieldModelsFromRemote(fields), diags)
+}
+
+func resourceFieldsValueFromRemote(ctx context.Context, managed types.List, fields []client.Field, diags *diag.Diagnostics) types.List {
+	models := fieldModelsFromRemote(fields)
+	if managed.IsNull() || managed.IsUnknown() {
+		return fieldsValueFromModels(ctx, models, diags)
+	}
+	var managedModels []tableFieldModel
+	newDiags := managed.ElementsAs(ctx, &managedModels, false)
+	if newDiags.HasError() || len(managedModels) != len(models) {
+		return fieldsValueFromModels(ctx, models, diags)
+	}
+	for index := range models {
+		if managedModels[index].Name.IsNull() || managedModels[index].Name.IsUnknown() || managedModels[index].Type.IsNull() || managedModels[index].Type.IsUnknown() {
+			continue
+		}
+		if managedModels[index].Name.ValueString() != models[index].Name.ValueString() {
+			continue
+		}
+		if client.EquivalentDataTypes(
+			client.DataType(managedModels[index].Type.ValueString()),
+			client.DataType(models[index].Type.ValueString()),
+		) {
+			models[index].Type = managedModels[index].Type
+		}
+	}
+
+	return fieldsValueFromModels(ctx, models, diags)
+}
+
+func fieldModelsFromRemote(fields []client.Field) []tableFieldModel {
 	models := make([]tableFieldModel, 0, len(fields))
 	for _, field := range fields {
 		typeName := strings.TrimSpace(string(field.Type))
@@ -336,6 +368,11 @@ func fieldsValueFromRemote(ctx context.Context, fields []client.Field, diags *di
 			DefaultValue: stringValueFromPointer(field.DefaultValue),
 		})
 	}
+
+	return models
+}
+
+func fieldsValueFromModels(ctx context.Context, models []tableFieldModel, diags *diag.Diagnostics) types.List {
 	value, newDiags := types.ListValueFrom(ctx, types.ObjectType{AttrTypes: tableFieldAttrTypes()}, models)
 	diags.Append(newDiags...)
 

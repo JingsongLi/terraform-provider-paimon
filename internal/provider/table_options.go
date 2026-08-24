@@ -19,9 +19,9 @@ package provider
 
 import (
 	"context"
-	"sort"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
@@ -83,50 +83,90 @@ func (reservedTableOptionsValidator) ValidateMap(_ context.Context, req validato
 }
 
 func immutableTableOptionsRequiresReplace(_ context.Context, req planmodifier.MapRequest, resp *mapplanmodifier.RequiresReplaceIfFuncResponse) {
-	before, beforeKnown := knownImmutableTableOptions(req.StateValue)
-	after, afterKnown := knownImmutableTableOptions(req.PlanValue)
-	if !beforeKnown || !afterKnown {
-		return
-	}
-	resp.RequiresReplace = immutableTableOptionsChanged(before, after)
+	resp.RequiresReplace = immutableTableOptionsChanged(req.StateValue, req.PlanValue)
 }
 
-func knownImmutableTableOptions(value types.Map) (map[string]string, bool) {
-	result := make(map[string]string)
-	if value.IsUnknown() {
-		return result, false
-	}
-	if value.IsNull() {
-		return result, true
-	}
+func immutableTableOptionsChanged(before, after types.Map) bool {
 	for key := range immutableTableOptions {
-		element, exists := value.Elements()[key]
-		if !exists {
+		beforeValue, beforeExists, beforeKnown := knownTableOption(before, key)
+		afterValue, afterExists, afterKnown := knownTableOption(after, key)
+		if !beforeKnown || !afterKnown {
 			continue
 		}
-		stringValue, ok := element.(types.String)
-		if !ok || stringValue.IsNull() || stringValue.IsUnknown() {
-			return result, false
+		if key == "type" && afterExists {
+			if !beforeExists {
+				beforeValue = "table"
+			}
+			if !strings.EqualFold(beforeValue, afterValue) {
+				return true
+			}
+
+			continue
 		}
-		result[key] = stringValue.ValueString()
-	}
-
-	return result, true
-}
-
-func immutableTableOptionsChanged(before, after map[string]string) bool {
-	keys := make([]string, 0, len(immutableTableOptions))
-	for key := range immutableTableOptions {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		beforeValue, beforeExists := before[key]
-		afterValue, afterExists := after[key]
 		if beforeExists != afterExists || beforeExists && beforeValue != afterValue {
 			return true
 		}
 	}
 
 	return false
+}
+
+func knownTableOption(options types.Map, key string) (string, bool, bool) {
+	if options.IsUnknown() {
+		return "", false, false
+	}
+	if options.IsNull() {
+		return "", false, true
+	}
+	element, exists := options.Elements()[key]
+	if !exists {
+		return "", false, true
+	}
+	value, ok := element.(types.String)
+	if !ok || value.IsNull() || value.IsUnknown() {
+		return "", true, false
+	}
+
+	return value.ValueString(), true, true
+}
+
+func diffTableOptions(before, after map[string]string) ([]string, map[string]string) {
+	removals, updates := diffOptions(before, after)
+	if afterType, exists := after["type"]; exists {
+		beforeType, beforeExists := before["type"]
+		if !beforeExists {
+			beforeType = "table"
+		}
+		if strings.EqualFold(beforeType, afterType) {
+			delete(updates, "type")
+		}
+	}
+
+	return removals, updates
+}
+
+func syncManagedTableOptions(ctx context.Context, managed types.Map, remote map[string]string, diags *diag.Diagnostics) types.Map {
+	synced := syncManagedOptions(ctx, managed, remote, diags)
+	if managed.IsNull() || managed.IsUnknown() || diags.HasError() {
+		return synced
+	}
+	managedOptions := mapFromValue(ctx, managed, diags)
+	configuredType, managesType := managedOptions["type"]
+	if !managesType || diags.HasError() {
+		return synced
+	}
+	remoteType, hasRemoteType := remote["type"]
+	if !hasRemoteType {
+		remoteType = "table"
+	}
+	if !strings.EqualFold(configuredType, remoteType) {
+		return synced
+	}
+	syncedOptions := mapFromValue(ctx, synced, diags)
+	if diags.HasError() {
+		return synced
+	}
+	syncedOptions["type"] = configuredType
+
+	return stringMapValue(ctx, syncedOptions, diags)
 }

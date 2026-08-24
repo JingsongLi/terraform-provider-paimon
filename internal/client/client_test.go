@@ -194,13 +194,63 @@ func TestDataTypeMarshalSupportsEmptyRow(t *testing.T) {
 }
 
 func TestDataTypeMarshalKeepsComparisonsInNestedDefaults(t *testing.T) {
-	encoded, err := json.Marshal(DataType("ROW<greater BOOLEAN DEFAULT (1 > 0), lesser BOOLEAN DEFAULT (1 < 2)>"))
+	for _, test := range []struct {
+		name           string
+		dataType       DataType
+		greaterDefault string
+		lesserDefault  string
+	}{
+		{
+			name:           "parenthesized",
+			dataType:       DataType("ROW<greater BOOLEAN DEFAULT (1 > 0), lesser BOOLEAN DEFAULT (1 < 2)>"),
+			greaterDefault: "(1 > 0)",
+			lesserDefault:  "(1 < 2)",
+		},
+		{
+			name:           "unparenthesized",
+			dataType:       DataType("ROW<greater BOOLEAN DEFAULT 1 > 0, lesser BOOLEAN DEFAULT 1 < 2>"),
+			greaterDefault: "1 > 0",
+			lesserDefault:  "1 < 2",
+		},
+		{
+			name:           "opaque composite keyword",
+			dataType:       DataType("ROW<greater BOOLEAN DEFAULT MAP > 0, lesser BOOLEAN DEFAULT MAP < 2>"),
+			greaterDefault: "MAP > 0",
+			lesserDefault:  "MAP < 2",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			encoded, err := json.Marshal(test.dataType)
+			require.NoError(t, err)
+			var structured struct {
+				Fields []struct {
+					DefaultValue string `json:"defaultValue"`
+				} `json:"fields"`
+			}
+			require.NoError(t, json.Unmarshal(encoded, &structured))
+			require.Len(t, structured.Fields, 2)
+			assert.Equal(t, test.greaterDefault, structured.Fields[0].DefaultValue)
+			assert.Equal(t, test.lesserDefault, structured.Fields[1].DefaultValue)
+		})
+	}
+}
+
+func TestEquivalentDataTypesNormalizesCompositeSpelling(t *testing.T) {
+	assert.True(t, EquivalentDataTypes(DataType("MAP<STRING,STRING>"), DataType("MAP<STRING, STRING>")))
+	assert.True(t, EquivalentDataTypes(DataType("ROW<`item` STRING>"), DataType("ROW<item STRING>")))
+	assert.False(t, EquivalentDataTypes(DataType("MAP<STRING, STRING>"), DataType("MAP<STRING, BIGINT>")))
+}
+
+func TestDataTypeMarshalKeepsComparisonInNestedRowDefault(t *testing.T) {
+	encoded, err := json.Marshal(DataType("ROW<nested ROW<flag BOOLEAN DEFAULT 1 > 0>, tail BOOLEAN DEFAULT 1 < 2>"))
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
 		"type":"ROW",
 		"fields":[
-			{"id":0,"name":"greater","type":"BOOLEAN","defaultValue":"(1 > 0)"},
-			{"id":1,"name":"lesser","type":"BOOLEAN","defaultValue":"(1 < 2)"}
+			{"id":0,"name":"nested","type":{"type":"ROW","fields":[
+				{"id":1,"name":"flag","type":"BOOLEAN","defaultValue":"1 > 0"}
+			]}},
+			{"id":2,"name":"tail","type":"BOOLEAN","defaultValue":"1 < 2"}
 		]
 	}`, string(encoded))
 }

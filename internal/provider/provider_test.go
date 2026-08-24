@@ -27,6 +27,7 @@ import (
 	"github.com/apache/terraform-provider-paimon/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	frameworkprovider "github.com/hashicorp/terraform-plugin-framework/provider"
 	providerschema "github.com/hashicorp/terraform-plugin-framework/provider/schema"
@@ -201,24 +202,83 @@ func TestReservedTableOptionsValidator(t *testing.T) {
 }
 
 func TestImmutableTableOptionsChanged(t *testing.T) {
+	mapValue := func(values map[string]attr.Value) types.Map {
+		return types.MapValueMust(types.StringType, values)
+	}
+
 	assert.False(t, immutableTableOptionsChanged(
-		map[string]string{"bucket": "2"},
-		map[string]string{"bucket": "4"},
+		mapValue(map[string]attr.Value{"bucket": types.StringValue("2")}),
+		mapValue(map[string]attr.Value{"bucket": types.StringValue("4")}),
 	))
 	assert.True(t, immutableTableOptionsChanged(
-		map[string]string{"merge-engine": "deduplicate"},
-		map[string]string{"merge-engine": "partial-update"},
+		mapValue(map[string]attr.Value{"merge-engine": types.StringValue("deduplicate")}),
+		mapValue(map[string]attr.Value{"merge-engine": types.StringValue("partial-update")}),
 	))
 	assert.True(t, immutableTableOptionsChanged(
-		map[string]string{"primary-key.nullable": "true"},
+		mapValue(map[string]attr.Value{"primary-key.nullable": types.StringValue("true")}),
+		mapValue(map[string]attr.Value{}),
+	))
+	assert.False(t, immutableTableOptionsChanged(
+		types.MapNull(types.StringType),
+		mapValue(map[string]attr.Value{"type": types.StringValue("table")}),
+	))
+	assert.False(t, immutableTableOptionsChanged(
+		mapValue(map[string]attr.Value{"type": types.StringValue("table")}),
+		mapValue(map[string]attr.Value{"type": types.StringValue("TABLE")}),
+	))
+	assert.True(t, immutableTableOptionsChanged(
+		mapValue(map[string]attr.Value{"type": types.StringValue("table")}),
+		mapValue(map[string]attr.Value{}),
+	))
+	assert.False(t, immutableTableOptionsChanged(
+		types.MapUnknown(types.StringType),
+		mapValue(map[string]attr.Value{"merge-engine": types.StringValue("partial-update")}),
+	))
+	assert.False(t, immutableTableOptionsChanged(
+		mapValue(map[string]attr.Value{"merge-engine": types.StringValue("deduplicate")}),
+		mapValue(map[string]attr.Value{"merge-engine": types.StringUnknown()}),
+	))
+	assert.True(t, immutableTableOptionsChanged(
+		mapValue(map[string]attr.Value{
+			"bucket-key":   types.StringValue("id"),
+			"merge-engine": types.StringValue("deduplicate"),
+		}),
+		mapValue(map[string]attr.Value{
+			"bucket-key":   types.StringUnknown(),
+			"merge-engine": types.StringValue("partial-update"),
+		}),
+	))
+}
+
+func TestTableTypeSemanticNoOpPreservesConfiguredValue(t *testing.T) {
+	removals, updates := diffTableOptions(
 		map[string]string{},
-	))
-	_, known := knownImmutableTableOptions(types.MapUnknown(types.StringType))
-	assert.False(t, known)
-	_, known = knownImmutableTableOptions(types.MapValueMust(types.StringType, map[string]attr.Value{
-		"merge-engine": types.StringUnknown(),
-	}))
-	assert.False(t, known)
+		map[string]string{"type": "table"},
+	)
+	assert.Empty(t, removals)
+	assert.Empty(t, updates)
+
+	removals, updates = diffTableOptions(
+		map[string]string{"type": "table"},
+		map[string]string{"type": "TABLE"},
+	)
+	assert.Empty(t, removals)
+	assert.Empty(t, updates)
+
+	ctx := context.Background()
+	managed := types.MapValueMust(types.StringType, map[string]attr.Value{
+		"type": types.StringValue("TABLE"),
+	})
+	var diagnostics diag.Diagnostics
+	synced := syncManagedTableOptions(ctx, managed, map[string]string{}, &diagnostics)
+	require.False(t, diagnostics.HasError(), diagnostics.Errors())
+	assert.Equal(t, map[string]string{"type": "TABLE"}, mapFromValue(ctx, synced, &diagnostics))
+	require.False(t, diagnostics.HasError(), diagnostics.Errors())
+
+	synced = syncManagedTableOptions(ctx, managed, map[string]string{"type": "table"}, &diagnostics)
+	require.False(t, diagnostics.HasError(), diagnostics.Errors())
+	assert.Equal(t, map[string]string{"type": "TABLE"}, mapFromValue(ctx, synced, &diagnostics))
+	require.False(t, diagnostics.HasError(), diagnostics.Errors())
 }
 
 func TestTableResourceLifecycle(t *testing.T) {
@@ -229,7 +289,11 @@ func TestTableResourceLifecycle(t *testing.T) {
 		Name:     "events",
 		SchemaID: 1,
 		Schema: client.Schema{
-			Fields:        []client.Field{{ID: 0, Name: "id", Type: client.DataType("BIGINT NOT NULL")}},
+			Fields: []client.Field{
+				{ID: 0, Name: "id", Type: client.DataType("BIGINT NOT NULL")},
+				{ID: 1, Name: "labels", Type: client.DataType("MAP<STRING, STRING>")},
+				{ID: 2, Name: "payload", Type: client.DataType("ROW<`item` STRING>")},
+			},
 			PartitionKeys: []string{},
 			PrimaryKeys:   []string{"id"},
 			Options:       map[string]string{"bucket": "2", "server-only": "preserved"},
@@ -289,6 +353,22 @@ func TestTableResourceLifecycle(t *testing.T) {
 			Description:  types.StringNull(),
 			DefaultValue: types.StringNull(),
 		},
+		{
+			ID:           types.Int64Unknown(),
+			Name:         types.StringValue("labels"),
+			Type:         types.StringValue("MAP<STRING,STRING>"),
+			Nullable:     types.BoolValue(true),
+			Description:  types.StringNull(),
+			DefaultValue: types.StringNull(),
+		},
+		{
+			ID:           types.Int64Unknown(),
+			Name:         types.StringValue("payload"),
+			Type:         types.StringValue("ROW<`item` STRING>"),
+			Nullable:     types.BoolValue(true),
+			Description:  types.StringNull(),
+			DefaultValue: types.StringNull(),
+		},
 	})
 	require.False(t, diagnostics.HasError(), diagnostics.Errors())
 	primaryKeys, diagnostics := types.ListValueFrom(ctx, types.StringType, []string{"id"})
@@ -320,6 +400,13 @@ func TestTableResourceLifecycle(t *testing.T) {
 	createResponse := resource.CreateResponse{State: tfsdk.State{Schema: schemaResponse.Schema}}
 	table.Create(ctx, resource.CreateRequest{Plan: plan}, &createResponse)
 	require.False(t, createResponse.Diagnostics.HasError(), createResponse.Diagnostics.Errors())
+	var createdModel tableResourceModel
+	require.False(t, createResponse.State.Get(ctx, &createdModel).HasError())
+	var createdFields []tableFieldModel
+	require.False(t, createdModel.Fields.ElementsAs(ctx, &createdFields, false).HasError())
+	require.Len(t, createdFields, 3)
+	assert.Equal(t, "MAP<STRING,STRING>", createdFields[1].Type.ValueString())
+	assert.Equal(t, "ROW<`item` STRING>", createdFields[2].Type.ValueString())
 
 	readResponse := resource.ReadResponse{State: createResponse.State}
 	table.Read(ctx, resource.ReadRequest{State: createResponse.State}, &readResponse)
@@ -327,6 +414,11 @@ func TestTableResourceLifecycle(t *testing.T) {
 
 	var updateModel tableResourceModel
 	require.False(t, readResponse.State.Get(ctx, &updateModel).HasError())
+	var refreshedFields []tableFieldModel
+	require.False(t, updateModel.Fields.ElementsAs(ctx, &refreshedFields, false).HasError())
+	require.Len(t, refreshedFields, 3)
+	assert.Equal(t, "MAP<STRING,STRING>", refreshedFields[1].Type.ValueString())
+	assert.Equal(t, "ROW<`item` STRING>", refreshedFields[2].Type.ValueString())
 	updateModel.Options = types.MapValueMust(types.StringType, map[string]attr.Value{"bucket": types.StringValue("4")})
 	updatePlan := tfsdk.Plan{Schema: schemaResponse.Schema}
 	require.False(t, updatePlan.Set(ctx, &updateModel).HasError())
