@@ -123,7 +123,7 @@ func tableResourceAttributes() map[string]rschema.Attribute {
 func tableFieldResourceAttributes() map[string]rschema.Attribute {
 	return map[string]rschema.Attribute{
 		"id": rschema.Int64Attribute{
-			Description: "Stable Paimon field ID between 0 and 2147483647. The next available ID is assigned when omitted.",
+			Description: "Stable Paimon field ID between 0 and " + strconv.Itoa(maxPaimonFieldID) + ". The next available ID is assigned when omitted.",
 			Optional:    true,
 			Computed:    true,
 		},

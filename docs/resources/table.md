@@ -46,7 +46,7 @@ resource "paimon_table" "example" {
 ```
 
 Each field supports `id`, `name`, `type`, `nullable`, `description`, and
-`default_value`. Field IDs must be unique integers from 0 through 2147483647;
+`default_value`. Field IDs must be unique integers from 0 through 1073741822;
 the next available ID is assigned when omitted. Use
 canonical Paimon SQL type strings such as `INT`, `BIGINT`, `STRING`,
 `DECIMAL(12, 2)`, `ARRAY<STRING>`, or `ROW<item STRING>`.
