@@ -257,11 +257,22 @@ func TestDataTypeMarshalKeepsComparisonInNestedRowDefault(t *testing.T) {
 
 func TestSchemaMarshalRejectsInvalidFieldIDs(t *testing.T) {
 	_, err := json.Marshal(Schema{Fields: []Field{
+		{ID: maxPaimonFieldID, Name: "max", Type: DataType("STRING")},
+	}})
+	require.NoError(t, err)
+
+	_, err = json.Marshal(Schema{Fields: []Field{
 		{ID: 1, Name: "first", Type: DataType("STRING")},
 		{ID: 1, Name: "duplicate", Type: DataType("STRING")},
 	}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "field ID 1 is duplicated")
+
+	_, err = json.Marshal(Schema{Fields: []Field{
+		{ID: maxPaimonFieldID + 1, Name: "reserved", Type: DataType("STRING")},
+	}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be between 0 and")
 
 	_, err = json.Marshal(Schema{Fields: []Field{
 		{ID: maxPaimonFieldID, Name: "row", Type: DataType("ROW<nested STRING>")},

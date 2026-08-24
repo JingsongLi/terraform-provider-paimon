@@ -93,9 +93,12 @@ func immutableTableOptionsChanged(before, after types.Map) bool {
 		if !beforeKnown || !afterKnown {
 			continue
 		}
-		if key == "type" && afterExists {
+		if key == "type" {
 			if !beforeExists {
 				beforeValue = "table"
+			}
+			if !afterExists {
+				afterValue = "table"
 			}
 			if !strings.EqualFold(beforeValue, afterValue) {
 				return true
@@ -132,13 +135,22 @@ func knownTableOption(options types.Map, key string) (string, bool, bool) {
 
 func diffTableOptions(before, after map[string]string) ([]string, map[string]string) {
 	removals, updates := diffOptions(before, after)
-	if afterType, exists := after["type"]; exists {
-		beforeType, beforeExists := before["type"]
-		if !beforeExists {
-			beforeType = "table"
-		}
-		if strings.EqualFold(beforeType, afterType) {
-			delete(updates, "type")
+	beforeType, beforeExists := before["type"]
+	if !beforeExists {
+		beforeType = "table"
+	}
+	afterType, afterExists := after["type"]
+	if !afterExists {
+		afterType = "table"
+	}
+	if strings.EqualFold(beforeType, afterType) {
+		delete(updates, "type")
+		for index, key := range removals {
+			if key == "type" {
+				removals = append(removals[:index], removals[index+1:]...)
+
+				break
+			}
 		}
 	}
 

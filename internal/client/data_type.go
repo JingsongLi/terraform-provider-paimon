@@ -26,7 +26,8 @@ import (
 	"unicode"
 )
 
-const maxPaimonFieldID = 1<<31 - 1
+// Paimon reserves IDs at and above SpecialFields.SYSTEM_FIELD_ID_START.
+const maxPaimonFieldID = (1 << 30) - 2
 
 type structuredDataType struct {
 	Type    string             `json:"type"`

@@ -45,7 +45,8 @@ type tableFieldModel struct {
 	DefaultValue types.String `tfsdk:"default_value"`
 }
 
-const maxPaimonFieldID = 1<<31 - 1
+// Paimon reserves IDs at and above SpecialFields.SYSTEM_FIELD_ID_START.
+const maxPaimonFieldID = (1 << 30) - 2
 
 func tableFieldAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{

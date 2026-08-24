@@ -139,6 +139,7 @@ func TestSchemaFromResourceModelAllocatesUnusedFieldIDs(t *testing.T) {
 		tableFieldForTest("second", types.Int64Unknown()),
 		tableFieldForTest("third", types.Int64Value(3)),
 		tableFieldForTest("fourth", types.Int64Null()),
+		tableFieldForTest("max", types.Int64Value(maxPaimonFieldID)),
 	})
 	require.False(t, diagnostics.HasError(), diagnostics.Errors())
 	model := tableResourceModel{
@@ -151,12 +152,13 @@ func TestSchemaFromResourceModelAllocatesUnusedFieldIDs(t *testing.T) {
 
 	tableSchema := schemaFromResourceModel(ctx, &model, &diagnostics)
 	require.False(t, diagnostics.HasError(), diagnostics.Errors())
-	require.Len(t, tableSchema.Fields, 4)
-	assert.Equal(t, []int{1, 0, 3, 2}, []int{
+	require.Len(t, tableSchema.Fields, 5)
+	assert.Equal(t, []int{1, 0, 3, 2, maxPaimonFieldID}, []int{
 		tableSchema.Fields[0].ID,
 		tableSchema.Fields[1].ID,
 		tableSchema.Fields[2].ID,
 		tableSchema.Fields[3].ID,
+		tableSchema.Fields[4].ID,
 	})
 }
 
@@ -166,6 +168,7 @@ func TestSchemaFromResourceModelRejectsInvalidFieldIDs(t *testing.T) {
 		tableFieldForTest("first", types.Int64Value(2)),
 		tableFieldForTest("duplicate", types.Int64Value(2)),
 		tableFieldForTest("negative", types.Int64Value(-1)),
+		tableFieldForTest("reserved", types.Int64Value(maxPaimonFieldID+1)),
 	})
 	require.False(t, diagnostics.HasError(), diagnostics.Errors())
 	model := tableResourceModel{
@@ -178,9 +181,10 @@ func TestSchemaFromResourceModelRejectsInvalidFieldIDs(t *testing.T) {
 
 	_ = schemaFromResourceModel(ctx, &model, &diagnostics)
 	require.True(t, diagnostics.HasError())
-	require.Len(t, diagnostics.Errors(), 2)
+	require.Len(t, diagnostics.Errors(), 3)
 	assert.Contains(t, diagnostics.Errors()[0].Summary(), "Duplicate Paimon field ID")
 	assert.Contains(t, diagnostics.Errors()[1].Summary(), "Invalid Paimon field ID")
+	assert.Contains(t, diagnostics.Errors()[2].Summary(), "Invalid Paimon field ID")
 }
 
 func TestReservedTableOptionsValidator(t *testing.T) {
@@ -226,7 +230,7 @@ func TestImmutableTableOptionsChanged(t *testing.T) {
 		mapValue(map[string]attr.Value{"type": types.StringValue("table")}),
 		mapValue(map[string]attr.Value{"type": types.StringValue("TABLE")}),
 	))
-	assert.True(t, immutableTableOptionsChanged(
+	assert.False(t, immutableTableOptionsChanged(
 		mapValue(map[string]attr.Value{"type": types.StringValue("table")}),
 		mapValue(map[string]attr.Value{}),
 	))
@@ -261,6 +265,13 @@ func TestTableTypeSemanticNoOpPreservesConfiguredValue(t *testing.T) {
 	removals, updates = diffTableOptions(
 		map[string]string{"type": "table"},
 		map[string]string{"type": "TABLE"},
+	)
+	assert.Empty(t, removals)
+	assert.Empty(t, updates)
+
+	removals, updates = diffTableOptions(
+		map[string]string{"type": "table"},
+		map[string]string{},
 	)
 	assert.Empty(t, removals)
 	assert.Empty(t, updates)
