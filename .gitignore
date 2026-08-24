@@ -1,0 +1,28 @@
+# Binaries
+bin/
+terraform-provider-paimon*
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraformrc
+.terraform.d/plugins/
+terraform-plugins/
+
+# Build, license check, and release artifacts
+build/
+lib/
+dist/
+apache-paimon-terraform-*.tar.gz
+
+# Editors and operating systems
+.idea/
+.idea_modules/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.DS_Store

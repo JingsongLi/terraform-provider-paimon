@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -euo pipefail
+
+readonly rat_version="0.15"
+project_root="$(cd "$(dirname "$0")/.." && pwd)"
+rat_jar="${project_root}/lib/apache-rat-${rat_version}.jar"
+rat_url="https://repo.maven.apache.org/maven2/org/apache/rat/apache-rat/${rat_version}/apache-rat-${rat_version}.jar"
+
+mkdir -p "${project_root}/lib" "${project_root}/build"
+if [[ ! -f "${rat_jar}" ]]; then
+  rat_partial="${rat_jar}.part"
+  curl --fail --location --silent --show-error "${rat_url}" --output "${rat_partial}"
+  mv "${rat_partial}" "${rat_jar}"
+fi
+
+if ! unzip -tq "${rat_jar}" >/dev/null; then
+  printf 'Invalid Apache RAT archive: %s\n' "${rat_jar}" >&2
+  exit 1
+fi
+
+java_command="java"
+if [[ -n "${JAVA_HOME:-}" && -x "${JAVA_HOME}/bin/java" ]]; then
+  java_command="${JAVA_HOME}/bin/java"
+fi
+
+results="${project_root}/build/rat-results.txt"
+"${java_command}" -jar "${rat_jar}" \
+  -E "${project_root}/dev/release/rat_exclude_files.txt" \
+  -d "${project_root}" >"${results}"
+
+if errors="$(grep -e '??' "${results}")" && [[ -n "${errors}" ]]; then
+  printf 'Could not find Apache license headers in:\n%s\n' "${errors}" >&2
+  exit 1
+fi
+
+printf 'Apache RAT checks passed.\n'
