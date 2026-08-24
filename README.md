@@ -42,17 +42,6 @@ Data sources:
 - `paimon_database` reads a database and its server metadata.
 - `paimon_table` reads a table schema, keys, options, and server metadata.
 
-Provider capabilities:
-
-- Paimon `/v1/config` discovery and server-supplied catalog prefix
-- optional warehouse selection
-- Bearer token authentication
-- Alibaba Cloud DLF AK/STS signing with default and OpenAPI algorithms
-- automatic STS refresh from a rotating local token file or ECS RAM role
-- custom HTTP headers
-- preservation of server options not managed by Terraform
-- nested Paimon type decoding from the REST wire format
-
 ## Example
 
 ```hcl
@@ -108,48 +97,7 @@ resource "paimon_table" "events" {
 }
 ```
 
-For an Alibaba Cloud DLF REST endpoint, static AK/STS authentication can be
-configured as follows. Both `/v1/config` and catalog operations are signed.
-
-```hcl
-provider "paimon" {
-  uri            = "https://dlf.cn-hangzhou.aliyuncs.com"
-  token_provider = "dlf"
-
-  dlf_access_key_id     = var.dlf_access_key_id
-  dlf_access_key_secret = var.dlf_access_key_secret
-  dlf_security_token    = var.dlf_security_token
-}
-```
-
-For renewable STS credentials, use a rotating JSON token file or an ECS RAM
-role instead of static values. The provider reloads dynamic credentials when
-they have less than one hour remaining:
-
-```hcl
-provider "paimon" {
-  uri              = "https://dlf.cn-hangzhou.aliyuncs.com"
-  token_provider   = "dlf"
-  dlf_token_loader = "local_file"
-  dlf_token_path   = "/run/secrets/dlf-sts.json"
-}
-```
-
-See [`docs/index.md`](docs/index.md) for the token JSON format, ECS setup, and
-signing-algorithm selection.
-
-Paimon primary key fields are non-null by default. To use nullable primary
-keys, set `options["primary-key.nullable"] = "true"` and set the matching
-field's `nullable` attribute to `true`.
-
 ## Lifecycle and safety
-
-In this initial version, `fields`, `partition_keys`, and `primary_keys` are
-immutable Terraform attributes. Changing one produces a table replacement.
-Paimon's managed-table drop operation can delete table data, so inspect plans
-carefully and use Terraform's `prevent_destroy` lifecycle rule for important
-tables. Table `options` and `comment` update in place through Paimon
-`SchemaChange` requests.
 
 Only the REST metastore is in scope. Filesystem, Hive, and JDBC catalogs are
 not accessed directly because Terraform needs a stable remote control-plane
