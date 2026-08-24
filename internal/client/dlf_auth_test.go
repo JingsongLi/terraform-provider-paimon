@@ -194,6 +194,15 @@ func TestFileDLFTokenLoaderLoadsSTSAndDoesNotLeakMalformedContent(t *testing.T) 
 	assert.NotContains(t, err.Error(), "must-not-appear-in-error")
 }
 
+func TestFileDLFTokenLoaderRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token.json")
+	require.NoError(t, os.WriteFile(path, []byte(strings.Repeat("x", (1<<20)+1)), 0o600))
+
+	loader := &fileDLFTokenLoader{path: path, maxAttempts: 1}
+	_, err := loader.Load(context.Background())
+	require.EqualError(t, err, "DLF token file is larger than 1 MiB")
+}
+
 func TestECSDLFTokenLoaderDiscoversAndCachesRole(t *testing.T) {
 	var roleRequests atomic.Int32
 	var credentialRequests atomic.Int32

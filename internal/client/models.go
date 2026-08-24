@@ -101,12 +101,18 @@ type alterTableRequest struct {
 }
 
 // DataType is Paimon's language-neutral REST representation of a data type.
-// It is encoded as Paimon's SQL type string on writes. Reads also accept the
-// structured JSON form used for ARRAY, MAP, MULTISET, ROW and VECTOR values.
+// Atomic types use SQL strings. ARRAY, MAP, MULTISET, ROW and VECTOR use the
+// structured JSON form required by Paimon's REST type parser.
 type DataType string
 
 func (t DataType) MarshalJSON() ([]byte, error) {
-	return json.Marshal(string(t))
+	nextFieldID := -1
+	value, err := encodeDataType(string(t), &nextFieldID)
+	if err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(value)
 }
 
 func (t *DataType) UnmarshalJSON(data []byte) error {
@@ -155,7 +161,7 @@ func (t *DataType) UnmarshalJSON(data []byte) error {
 		fields := make([]string, 0, len(structured.Fields))
 		for _, field := range structured.Fields {
 			part := quoteIdentifier(field.Name) + " " + string(field.Type)
-			if field.Description != nil {
+			if field.Description != nil && *field.Description != "" {
 				part += " COMMENT '" + strings.ReplaceAll(*field.Description, "'", "''") + "'"
 			}
 			if field.DefaultValue != nil {

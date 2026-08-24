@@ -137,7 +137,7 @@ func (r *tableResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	removals, updates := diffOptions(before, after)
+	removals, updates := diffTableOptions(before, after)
 	sort.Strings(removals)
 	updateKeys := make([]string, 0, len(updates))
 	for key := range updates {
@@ -216,10 +216,10 @@ func setTableResourceModel(ctx context.Context, model *tableResourceModel, table
 	model.CatalogID = types.StringValue(table.ID)
 	model.Database = types.StringValue(database)
 	model.Name = types.StringValue(name)
-	model.Fields = fieldsValueFromRemote(ctx, table.Schema.Fields, diags)
+	model.Fields = resourceFieldsValueFromRemote(ctx, model.Fields, table.Schema.Fields, diags)
 	model.PartitionKeys = stringListValue(ctx, table.Schema.PartitionKeys, diags)
 	model.PrimaryKeys = stringListValue(ctx, table.Schema.PrimaryKeys, diags)
-	model.Options = syncManagedOptions(ctx, model.Options, table.Schema.Options, diags)
+	model.Options = syncManagedTableOptions(ctx, model.Options, table.Schema.Options, diags)
 	model.ServerOptions = stringMapValue(ctx, table.Schema.Options, diags)
 	model.Comment = stringValueFromPointer(table.Schema.Comment)
 	model.SchemaID = types.Int64Value(table.SchemaID)

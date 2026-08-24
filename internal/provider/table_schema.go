@@ -29,6 +29,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
@@ -43,6 +44,9 @@ type tableFieldModel struct {
 	Description  types.String `tfsdk:"description"`
 	DefaultValue types.String `tfsdk:"default_value"`
 }
+
+// Paimon reserves IDs at and above SpecialFields.SYSTEM_FIELD_ID_START.
+const maxPaimonFieldID = (1 << 30) - 2
 
 func tableFieldAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
@@ -93,9 +97,11 @@ func tableResourceAttributes() map[string]rschema.Attribute {
 			PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplace()},
 		},
 		"options": rschema.MapAttribute{
-			Description: "Table options managed by Terraform. Options not declared here are preserved.",
-			Optional:    true,
-			ElementType: types.StringType,
+			Description:   "Table options managed by Terraform. Options not declared here are preserved. Paimon options that are immutable after creation cause replacement when changed.",
+			Optional:      true,
+			ElementType:   types.StringType,
+			Validators:    []validator.Map{reservedTableOptionsValidator{}},
+			PlanModifiers: []planmodifier.Map{mapplanmodifier.RequiresReplaceIf(immutableTableOptionsRequiresReplace, "replaces the table when an immutable Paimon option changes", "replaces the table when an immutable Paimon option changes")},
 		},
 		"server_options": rschema.MapAttribute{
 			Description: "All table options returned by the REST Catalog.",
@@ -117,7 +123,7 @@ func tableResourceAttributes() map[string]rschema.Attribute {
 func tableFieldResourceAttributes() map[string]rschema.Attribute {
 	return map[string]rschema.Attribute{
 		"id": rschema.Int64Attribute{
-			Description: "Stable field ID. It is assigned by position when omitted.",
+			Description: "Stable Paimon field ID between 0 and " + strconv.Itoa(maxPaimonFieldID) + ". The next available ID is assigned when omitted.",
 			Optional:    true,
 			Computed:    true,
 		},
@@ -181,15 +187,11 @@ func schemaFromResourceModel(ctx context.Context, model *tableResourceModel, dia
 	if diags.HasError() {
 		return client.Schema{}
 	}
-	if len(primaryKeys) > 0 {
-		if _, exists := options["primary-key"]; exists {
-			diags.AddError("Conflicting primary key configuration", "Configure primary_keys or the primary-key table option, not both.")
-		}
+	if _, exists := options["primary-key"]; exists {
+		diags.AddError("Reserved table option", "Configure primary_keys instead of the primary-key table option.")
 	}
-	if len(partitionKeys) > 0 {
-		if _, exists := options["partition"]; exists {
-			diags.AddError("Conflicting partition configuration", "Configure partition_keys or the partition table option, not both.")
-		}
+	if _, exists := options["partition"]; exists {
+		diags.AddError("Reserved table option", "Configure partition_keys instead of the partition table option.")
 	}
 	primaryKeyNullable := false
 	if configured, exists := options["primary-key.nullable"]; exists {
@@ -207,13 +209,10 @@ func schemaFromResourceModel(ctx context.Context, model *tableResourceModel, dia
 
 	var fieldModels []tableFieldModel
 	diags.Append(model.Fields.ElementsAs(ctx, &fieldModels, false)...)
+	fieldIDs := allocateFieldIDs(fieldModels, diags)
 	fields := make([]client.Field, 0, len(fieldModels))
 	fieldNames := make(map[string]struct{}, len(fieldModels))
 	for index, field := range fieldModels {
-		fieldID := index
-		if !field.ID.IsNull() && !field.ID.IsUnknown() {
-			fieldID = int(field.ID.ValueInt64())
-		}
 		typeName := strings.TrimSpace(field.Type.ValueString())
 		hasNotNullSuffix := strings.HasSuffix(strings.ToUpper(typeName), " NOT NULL")
 		_, isPrimaryKey := primaryKeySet[field.Name.ValueString()]
@@ -242,7 +241,7 @@ func schemaFromResourceModel(ctx context.Context, model *tableResourceModel, dia
 			typeName += " NOT NULL"
 		}
 		fields = append(fields, client.Field{
-			ID:           fieldID,
+			ID:           fieldIDs[index],
 			Name:         field.Name.ValueString(),
 			Type:         client.DataType(typeName),
 			Description:  optionalStringPointer(field.Description),
@@ -265,6 +264,48 @@ func schemaFromResourceModel(ctx context.Context, model *tableResourceModel, dia
 	}
 }
 
+func allocateFieldIDs(fields []tableFieldModel, diags *diag.Diagnostics) []int {
+	ids := make([]int, len(fields))
+	used := make(map[int]int, len(fields))
+	for index, field := range fields {
+		if field.ID.IsNull() || field.ID.IsUnknown() {
+			continue
+		}
+		configured := field.ID.ValueInt64()
+		if configured < 0 || configured > maxPaimonFieldID {
+			diags.AddError("Invalid Paimon field ID", "Field "+field.Name.ValueString()+" must have a field ID between 0 and "+strconv.Itoa(maxPaimonFieldID)+".")
+
+			continue
+		}
+		id := int(configured)
+		if previous, duplicate := used[id]; duplicate {
+			diags.AddError("Duplicate Paimon field ID", "Fields "+fields[previous].Name.ValueString()+" and "+field.Name.ValueString()+" use the same field ID: "+strconv.Itoa(id))
+
+			continue
+		}
+		ids[index] = id
+		used[id] = index
+	}
+
+	next := 0
+	for index, field := range fields {
+		if !field.ID.IsNull() && !field.ID.IsUnknown() {
+			continue
+		}
+		for {
+			if _, exists := used[next]; !exists {
+				break
+			}
+			next++
+		}
+		ids[index] = next
+		used[next] = index
+		next++
+	}
+
+	return ids
+}
+
 func validateKeyFields(attribute string, keys []string, fields map[string]struct{}, diags *diag.Diagnostics) {
 	seen := make(map[string]struct{}, len(keys))
 	for _, key := range keys {
@@ -279,6 +320,38 @@ func validateKeyFields(attribute string, keys []string, fields map[string]struct
 }
 
 func fieldsValueFromRemote(ctx context.Context, fields []client.Field, diags *diag.Diagnostics) types.List {
+	return fieldsValueFromModels(ctx, fieldModelsFromRemote(fields), diags)
+}
+
+func resourceFieldsValueFromRemote(ctx context.Context, managed types.List, fields []client.Field, diags *diag.Diagnostics) types.List {
+	models := fieldModelsFromRemote(fields)
+	if managed.IsNull() || managed.IsUnknown() {
+		return fieldsValueFromModels(ctx, models, diags)
+	}
+	var managedModels []tableFieldModel
+	newDiags := managed.ElementsAs(ctx, &managedModels, false)
+	if newDiags.HasError() || len(managedModels) != len(models) {
+		return fieldsValueFromModels(ctx, models, diags)
+	}
+	for index := range models {
+		if managedModels[index].Name.IsNull() || managedModels[index].Name.IsUnknown() || managedModels[index].Type.IsNull() || managedModels[index].Type.IsUnknown() {
+			continue
+		}
+		if managedModels[index].Name.ValueString() != models[index].Name.ValueString() {
+			continue
+		}
+		if client.EquivalentDataTypes(
+			client.DataType(managedModels[index].Type.ValueString()),
+			client.DataType(models[index].Type.ValueString()),
+		) {
+			models[index].Type = managedModels[index].Type
+		}
+	}
+
+	return fieldsValueFromModels(ctx, models, diags)
+}
+
+func fieldModelsFromRemote(fields []client.Field) []tableFieldModel {
 	models := make([]tableFieldModel, 0, len(fields))
 	for _, field := range fields {
 		typeName := strings.TrimSpace(string(field.Type))
@@ -296,6 +369,11 @@ func fieldsValueFromRemote(ctx context.Context, fields []client.Field, diags *di
 			DefaultValue: stringValueFromPointer(field.DefaultValue),
 		})
 	}
+
+	return models
+}
+
+func fieldsValueFromModels(ctx context.Context, models []tableFieldModel, diags *diag.Diagnostics) types.List {
 	value, newDiags := types.ListValueFrom(ctx, types.ObjectType{AttrTypes: tableFieldAttrTypes()}, models)
 	diags.Append(newDiags...)
 
