@@ -115,11 +115,8 @@ terraform import paimon_table.events analytics.events
 Go 1.25 or newer is required.
 
 ```bash
-make fmt
-make test
-make build
+make check
 ```
 
 See [`docs/index.md`](docs/index.md) for the full provider configuration and
-resource notes. The source comparison and implementation tradeoffs are recorded
-in [`docs/design.md`](docs/design.md).
+resource notes.

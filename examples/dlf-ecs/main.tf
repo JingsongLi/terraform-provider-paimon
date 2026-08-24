@@ -22,7 +22,8 @@ terraform {
 }
 
 provider "paimon" {
-  uri              = "https://dlf.cn-hangzhou.aliyuncs.com"
+  uri              = "https://dlfnext.cn-hangzhou.aliyuncs.com"
+  warehouse        = "my_catalog"
   token_provider   = "dlf"
   dlf_token_loader = "ecs"
 

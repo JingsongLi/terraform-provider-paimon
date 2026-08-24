@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -140,12 +141,148 @@ func TestDataTypeStructuredJSON(t *testing.T) {
 
 	encoded, err := json.Marshal(dataType)
 	require.NoError(t, err)
-	assert.JSONEq(t, `"ROW<item ARRAY<STRING NOT NULL>> NOT NULL"`, string(encoded))
+	assert.JSONEq(t, `{
+		"type":"ROW NOT NULL",
+		"fields":[{"id":0,"name":"item","type":{"type":"ARRAY","element":"STRING NOT NULL"}}]
+	}`, string(encoded))
+}
+
+func TestSchemaMarshalAssignsUniqueNestedFieldIDs(t *testing.T) {
+	schema := Schema{
+		Fields: []Field{
+			{ID: 2, Name: "id", Type: DataType("BIGINT NOT NULL")},
+			{
+				ID:   7,
+				Name: "payload",
+				Type: DataType("ROW<`item name` ARRAY<MAP<STRING NOT NULL, ROW<value VECTOR<DOUBLE, 3>>>> COMMENT 'item''s label' DEFAULT CAST(NULL AS STRING)>"),
+			},
+		},
+	}
+
+	encoded, err := json.Marshal(schema)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"fields":[
+			{"id":2,"name":"id","type":"BIGINT NOT NULL"},
+			{"id":7,"name":"payload","type":{
+				"type":"ROW",
+				"fields":[{
+					"id":8,
+					"name":"item name",
+					"type":{"type":"ARRAY","element":{"type":"MAP","key":"STRING NOT NULL","value":{"type":"ROW","fields":[{"id":9,"name":"value","type":{"type":"VECTOR","element":"DOUBLE","length":3}}]}}},
+					"description":"item's label",
+					"defaultValue":"CAST(NULL AS STRING)"
+				}]
+			}}
+		],
+		"partitionKeys":[],
+		"primaryKeys":[],
+		"options":{}
+	}`, string(encoded))
+}
+
+func TestDataTypeMarshalRejectsMalformedComposite(t *testing.T) {
+	_, err := json.Marshal(DataType("MAP<STRING>"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expected key and value types")
+}
+
+func TestDataTypeMarshalSupportsEmptyRow(t *testing.T) {
+	encoded, err := json.Marshal(DataType("ROW<> NOT NULL"))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"type":"ROW NOT NULL","fields":[]}`, string(encoded))
+}
+
+func TestDataTypeMarshalKeepsComparisonsInNestedDefaults(t *testing.T) {
+	encoded, err := json.Marshal(DataType("ROW<greater BOOLEAN DEFAULT (1 > 0), lesser BOOLEAN DEFAULT (1 < 2)>"))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"type":"ROW",
+		"fields":[
+			{"id":0,"name":"greater","type":"BOOLEAN","defaultValue":"(1 > 0)"},
+			{"id":1,"name":"lesser","type":"BOOLEAN","defaultValue":"(1 < 2)"}
+		]
+	}`, string(encoded))
+}
+
+func TestSchemaMarshalRejectsInvalidFieldIDs(t *testing.T) {
+	_, err := json.Marshal(Schema{Fields: []Field{
+		{ID: 1, Name: "first", Type: DataType("STRING")},
+		{ID: 1, Name: "duplicate", Type: DataType("STRING")},
+	}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "field ID 1 is duplicated")
+
+	_, err = json.Marshal(Schema{Fields: []Field{
+		{ID: maxPaimonFieldID, Name: "row", Type: DataType("ROW<nested STRING>")},
+	}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nested field IDs exceed")
 }
 
 func TestNewRejectsInvalidURI(t *testing.T) {
 	_, err := New(Config{URI: "localhost:8080"})
 	require.EqualError(t, err, "Paimon REST URI must use http or https")
+}
+
+func TestClientRejectsRedirectWithoutForwardingCredentials(t *testing.T) {
+	var targetCalls atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetCalls.Add(1)
+		assert.Empty(t, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	for name, config := range map[string]Config{
+		"bearer": {URI: redirect.URL, Token: "must-not-leak"},
+		"dlf": {
+			URI:          redirect.URL,
+			AuthProvider: AuthProviderDLF,
+			DLF: &DLFConfig{
+				Region:           "cn-hangzhou",
+				AccessKeyID:      "must-not-leak-id",
+				AccessKeySecret:  "must-not-leak-secret",
+				SecurityToken:    "must-not-leak-sts",
+				SigningAlgorithm: DLFSigningDefault,
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			api, err := New(config)
+			require.NoError(t, err)
+			_, err = api.GetDatabase(context.Background(), "analytics")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "redirects are not allowed")
+			assert.NotContains(t, err.Error(), "must-not-leak")
+			assert.Equal(t, int32(0), targetCalls.Load())
+		})
+	}
+}
+
+func TestClientRejectsOversizedSuccessfulResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/config" {
+			writeJSON(t, w, ConfigResponse{Defaults: map[string]string{"prefix": "catalog"}})
+
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"`))
+		_, _ = w.Write([]byte(strings.Repeat("x", maxAPIResponseBodySize)))
+		_, _ = w.Write([]byte(`"}`))
+	}))
+	defer server.Close()
+
+	api, err := New(Config{URI: server.URL})
+	require.NoError(t, err)
+	_, err = api.GetDatabase(context.Background(), "analytics")
+	require.EqualError(t, err, "Paimon REST response exceeded 16 MiB size limit")
 }
 
 func writeJSON(t *testing.T, w http.ResponseWriter, value any) {

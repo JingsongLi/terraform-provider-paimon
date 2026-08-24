@@ -46,13 +46,20 @@ resource "paimon_table" "example" {
 ```
 
 Each field supports `id`, `name`, `type`, `nullable`, `description`, and
-`default_value`. Field IDs are assigned by list position when omitted. Use
+`default_value`. Field IDs must be unique integers from 0 through 2147483647;
+the next available ID is assigned when omitted. Use
 canonical Paimon SQL type strings such as `INT`, `BIGINT`, `STRING`,
 `DECIMAL(12, 2)`, `ARRAY<STRING>`, or `ROW<item STRING>`.
 
 `database`, `name`, `fields`, `partition_keys`, and `primary_keys` are
-replacement attributes. `options` and `comment` update in place. Unmanaged
-server options are preserved and exposed through `server_options`.
+replacement attributes. Configure keys with `primary_keys` and
+`partition_keys`; the normalized Paimon options `primary-key` and `partition`
+are rejected in `options` because the server removes them from its options map.
+
+Mutable `options` and `comment` update in place. Changing or removing an option
+that Paimon defines as immutable, such as `merge-engine`, `bucket-key`, `type`,
+or `primary-key.nullable`, replaces the table. Unmanaged server options are
+preserved and exposed through `server_options`.
 
 Dropping a managed table can delete its data. Use `prevent_destroy` where
 appropriate:

@@ -145,6 +145,7 @@ func newDLFAuthenticator(endpoint *url.URL, config DLFConfig, defaultHTTPClient 
 	if httpClient == nil {
 		httpClient = defaultHTTPClient
 	}
+	httpClient = noRedirectHTTPClient(httpClient)
 	provider, err := newDLFCredentialProvider(config, httpClient)
 	if err != nil {
 		return nil, err
@@ -343,21 +344,15 @@ func (l *fileDLFTokenLoader) Load(ctx context.Context) (dlfCredentials, error) {
 	}
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
-		contents, err := os.ReadFile(l.path)
+		contents, err := readDLFTokenFile(l.path)
 		if err == nil {
-			if len(contents) > 1<<20 {
-				err = errors.New("DLF token file is larger than 1 MiB")
-			} else {
-				var credentials dlfCredentials
-				if decodeErr := json.Unmarshal(contents, &credentials); decodeErr == nil {
-					if validationErr := credentials.validate(); validationErr == nil {
-						return credentials, nil
-					}
+			var credentials dlfCredentials
+			if decodeErr := json.Unmarshal(contents, &credentials); decodeErr == nil {
+				if validationErr := credentials.validate(); validationErr == nil {
+					return credentials, nil
 				}
-				err = errors.New("failed to parse DLF token file")
 			}
-		} else {
-			err = errors.New("failed to read DLF token file")
+			err = errors.New("failed to parse DLF token file")
 		}
 		lastErr = err
 		if attempt == attempts {
@@ -375,6 +370,24 @@ func (l *fileDLFTokenLoader) Load(ctx context.Context) (dlfCredentials, error) {
 	}
 
 	return dlfCredentials{}, lastErr
+}
+
+func readDLFTokenFile(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("failed to read DLF token file")
+	}
+	defer file.Close()
+
+	contents, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
+	if err != nil {
+		return nil, errors.New("failed to read DLF token file")
+	}
+	if len(contents) > 1<<20 {
+		return nil, errors.New("DLF token file is larger than 1 MiB")
+	}
+
+	return contents, nil
 }
 
 type ecsDLFTokenLoader struct {

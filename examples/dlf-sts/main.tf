@@ -38,7 +38,8 @@ variable "dlf_security_token" {
 }
 
 provider "paimon" {
-  uri            = "https://dlf.cn-hangzhou.aliyuncs.com"
+  uri            = "https://dlfnext.cn-hangzhou.aliyuncs.com"
+  warehouse      = "my_catalog"
   token_provider = "dlf"
 
   dlf_access_key_id     = var.dlf_access_key_id

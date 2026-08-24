@@ -32,7 +32,10 @@ import (
 	"time"
 )
 
-const userAgent = "terraform-provider-paimon"
+const (
+	userAgent              = "terraform-provider-paimon"
+	maxAPIResponseBodySize = 16 << 20
+)
 
 type Config struct {
 	URI          string
@@ -96,10 +99,7 @@ func New(config Config) (*Client, error) {
 		return nil, errors.New("Paimon REST URI must not include a query or fragment")
 	}
 
-	httpClient := config.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
-	}
+	httpClient := noRedirectHTTPClient(config.HTTPClient)
 
 	configuredAuth := strings.ToLower(strings.TrimSpace(config.AuthProvider))
 	if configuredAuth == "" && config.Token != "" {
@@ -311,16 +311,35 @@ func (c *Client) doRaw(ctx context.Context, method string, segments []string, qu
 		return apiErr
 	}
 
+	contents, err := io.ReadAll(io.LimitReader(response.Body, maxAPIResponseBodySize+1))
+	if err != nil {
+		return errors.New("read Paimon REST response")
+	}
+	if len(contents) > maxAPIResponseBodySize {
+		return errors.New("Paimon REST response exceeded 16 MiB size limit")
+	}
+
 	if result == nil || response.StatusCode == http.StatusNoContent {
-		_, _ = io.Copy(io.Discard, response.Body)
 
 		return nil
 	}
-	if err := json.NewDecoder(response.Body).Decode(result); err != nil {
+	if err := json.Unmarshal(contents, result); err != nil {
 		return fmt.Errorf("decode Paimon REST response: %w", err)
 	}
 
 	return nil
+}
+
+func noRedirectHTTPClient(input *http.Client) *http.Client {
+	if input == nil {
+		input = &http.Client{Timeout: 30 * time.Second}
+	}
+	output := *input
+	output.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return errors.New("Paimon REST API redirects are not allowed")
+	}
+
+	return &output
 }
 
 func (c *Client) endpoint(segments []string, query url.Values) string {

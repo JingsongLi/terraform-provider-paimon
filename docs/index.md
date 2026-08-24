@@ -42,10 +42,36 @@ provider "paimon" {
 - `token_provider` (optional): `bear` for Bearer authentication or `dlf` for
   Alibaba Cloud DLF AK/STS signing. It is inferred when omitted.
 - `token` (optional, sensitive): token used by the `bear` provider.
+- `prefix` (optional): client catalog path prefix. A server override returned
+  by `/v1/config` takes precedence.
+- `headers` (optional, sensitive): additional REST request headers. The
+  provider-managed `Authorization` header takes precedence.
+- `dlf_region` (optional): region for DLF default signing. Standard DLF
+  endpoints allow it to be inferred.
+- `dlf_signing_algorithm` (optional): `default` for DLF VPC/default endpoints
+  or `openapi` for DLFNext endpoints. It is inferred from standard endpoints.
+- `dlf_access_key_id` and `dlf_access_key_secret` (optional, sensitive): a
+  static Alibaba Cloud access key pair.
+- `dlf_security_token` (optional, sensitive): STS token paired with static
+  access keys.
+- `dlf_token_loader` (optional): `local_file` for a rotating token file or
+  `ecs` for ECS RAM role credentials.
+- `dlf_token_path` (optional): path to the rotating AK/STS JSON file. Setting
+  it implies the `local_file` loader.
+- `dlf_ecs_metadata_url` (optional): compatible ECS metadata endpoint override.
+- `dlf_ecs_role_name` (optional): RAM role name. The `ecs` loader discovers it
+  when omitted.
+
+Exactly one DLF credential source may be configured: static AK/STS, a local
+token file, or an ECS RAM role. DLF Catalog requests also require `warehouse`.
+See the [static STS](../examples/dlf-sts/main.tf),
+[rotating token file](../examples/dlf-token-file/main.tf), and
+[ECS role](../examples/dlf-ecs/main.tf) examples.
 
 The provider first calls `/v1/config`, merges server defaults, client values,
 and server overrides in that order, and then uses the resulting `prefix` for
-catalog operations.
+catalog operations. Redirects are rejected so authentication headers and DLF
+signatures are never reused for a different URL.
 
 ## Resources and data sources
 

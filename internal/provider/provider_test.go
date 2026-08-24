@@ -19,13 +19,20 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/apache/terraform-provider-paimon/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	frameworkprovider "github.com/hashicorp/terraform-plugin-framework/provider"
 	providerschema "github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -122,4 +129,227 @@ func TestSchemaFromResourceModelNormalizesPrimaryKeyNullability(t *testing.T) {
 	require.False(t, diagnostics.HasError(), diagnostics.Errors())
 	require.Len(t, tableSchema.Fields, 1)
 	assert.Equal(t, client.DataType("BIGINT NOT NULL"), tableSchema.Fields[0].Type)
+}
+
+func TestSchemaFromResourceModelAllocatesUnusedFieldIDs(t *testing.T) {
+	ctx := context.Background()
+	fields, diagnostics := types.ListValueFrom(ctx, types.ObjectType{AttrTypes: tableFieldAttrTypes()}, []tableFieldModel{
+		tableFieldForTest("first", types.Int64Value(1)),
+		tableFieldForTest("second", types.Int64Unknown()),
+		tableFieldForTest("third", types.Int64Value(3)),
+		tableFieldForTest("fourth", types.Int64Null()),
+	})
+	require.False(t, diagnostics.HasError(), diagnostics.Errors())
+	model := tableResourceModel{
+		Fields:        fields,
+		PartitionKeys: types.ListNull(types.StringType),
+		PrimaryKeys:   types.ListNull(types.StringType),
+		Options:       types.MapNull(types.StringType),
+		Comment:       types.StringNull(),
+	}
+
+	tableSchema := schemaFromResourceModel(ctx, &model, &diagnostics)
+	require.False(t, diagnostics.HasError(), diagnostics.Errors())
+	require.Len(t, tableSchema.Fields, 4)
+	assert.Equal(t, []int{1, 0, 3, 2}, []int{
+		tableSchema.Fields[0].ID,
+		tableSchema.Fields[1].ID,
+		tableSchema.Fields[2].ID,
+		tableSchema.Fields[3].ID,
+	})
+}
+
+func TestSchemaFromResourceModelRejectsInvalidFieldIDs(t *testing.T) {
+	ctx := context.Background()
+	fields, diagnostics := types.ListValueFrom(ctx, types.ObjectType{AttrTypes: tableFieldAttrTypes()}, []tableFieldModel{
+		tableFieldForTest("first", types.Int64Value(2)),
+		tableFieldForTest("duplicate", types.Int64Value(2)),
+		tableFieldForTest("negative", types.Int64Value(-1)),
+	})
+	require.False(t, diagnostics.HasError(), diagnostics.Errors())
+	model := tableResourceModel{
+		Fields:        fields,
+		PartitionKeys: types.ListNull(types.StringType),
+		PrimaryKeys:   types.ListNull(types.StringType),
+		Options:       types.MapNull(types.StringType),
+		Comment:       types.StringNull(),
+	}
+
+	_ = schemaFromResourceModel(ctx, &model, &diagnostics)
+	require.True(t, diagnostics.HasError())
+	require.Len(t, diagnostics.Errors(), 2)
+	assert.Contains(t, diagnostics.Errors()[0].Summary(), "Duplicate Paimon field ID")
+	assert.Contains(t, diagnostics.Errors()[1].Summary(), "Invalid Paimon field ID")
+}
+
+func TestReservedTableOptionsValidator(t *testing.T) {
+	ctx := context.Background()
+	options, diagnostics := types.MapValueFrom(ctx, types.StringType, map[string]string{
+		"bucket":      "4",
+		"partition":   "dt",
+		"primary-key": "id",
+	})
+	require.False(t, diagnostics.HasError(), diagnostics.Errors())
+
+	var response validator.MapResponse
+	reservedTableOptionsValidator{}.ValidateMap(ctx, validator.MapRequest{
+		Path:        path.Root("options"),
+		ConfigValue: options,
+	}, &response)
+	require.True(t, response.Diagnostics.HasError())
+	assert.Contains(t, response.Diagnostics.Errors()[0].Detail(), "partition, primary-key")
+}
+
+func TestImmutableTableOptionsChanged(t *testing.T) {
+	assert.False(t, immutableTableOptionsChanged(
+		map[string]string{"bucket": "2"},
+		map[string]string{"bucket": "4"},
+	))
+	assert.True(t, immutableTableOptionsChanged(
+		map[string]string{"merge-engine": "deduplicate"},
+		map[string]string{"merge-engine": "partial-update"},
+	))
+	assert.True(t, immutableTableOptionsChanged(
+		map[string]string{"primary-key.nullable": "true"},
+		map[string]string{},
+	))
+	_, known := knownImmutableTableOptions(types.MapUnknown(types.StringType))
+	assert.False(t, known)
+	_, known = knownImmutableTableOptions(types.MapValueMust(types.StringType, map[string]attr.Value{
+		"merge-engine": types.StringUnknown(),
+	}))
+	assert.False(t, known)
+}
+
+func TestTableResourceLifecycle(t *testing.T) {
+	ctx := context.Background()
+	remote := client.Table{
+		ID:       "table-id",
+		Database: "analytics",
+		Name:     "events",
+		SchemaID: 1,
+		Schema: client.Schema{
+			Fields:        []client.Field{{ID: 0, Name: "id", Type: client.DataType("BIGINT NOT NULL")}},
+			PartitionKeys: []string{},
+			PrimaryKeys:   []string{"id"},
+			Options:       map[string]string{"bucket": "2", "server-only": "preserved"},
+		},
+	}
+	createCalls, readCalls, updateCalls, deleteCalls := 0, 0, 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/v1/config":
+			require.NoError(t, json.NewEncoder(w).Encode(client.ConfigResponse{Defaults: map[string]string{"prefix": "catalog"}}))
+		case request.Method == http.MethodPost && request.URL.Path == "/v1/catalog/databases/analytics/tables":
+			createCalls++
+			var body struct {
+				Identifier client.Identifier `json:"identifier"`
+				Schema     client.Schema     `json:"schema"`
+			}
+			require.NoError(t, json.NewDecoder(request.Body).Decode(&body))
+			assert.Equal(t, "events", body.Identifier.Object)
+			assert.Equal(t, map[string]string{"bucket": "2"}, body.Schema.Options)
+			w.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodGet && request.URL.Path == "/v1/catalog/databases/analytics/tables/events":
+			readCalls++
+			require.NoError(t, json.NewEncoder(w).Encode(remote))
+		case request.Method == http.MethodPost && request.URL.Path == "/v1/catalog/databases/analytics/tables/events":
+			updateCalls++
+			var body struct {
+				Changes []client.SchemaChange `json:"changes"`
+			}
+			require.NoError(t, json.NewDecoder(request.Body).Decode(&body))
+			assert.Equal(t, []client.SchemaChange{{"action": "setOption", "key": "bucket", "value": "4"}}, body.Changes)
+			remote.Schema.Options["bucket"] = "4"
+			remote.SchemaID++
+			w.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodDelete && request.URL.Path == "/v1/catalog/databases/analytics/tables/events":
+			deleteCalls++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+
+	api, err := client.New(client.Config{URI: server.URL})
+	require.NoError(t, err)
+	table := &tableResource{client: api}
+	var schemaResponse resource.SchemaResponse
+	table.Schema(ctx, resource.SchemaRequest{}, &schemaResponse)
+	require.False(t, schemaResponse.Diagnostics.HasError(), schemaResponse.Diagnostics.Errors())
+
+	fields, diagnostics := types.ListValueFrom(ctx, types.ObjectType{AttrTypes: tableFieldAttrTypes()}, []tableFieldModel{
+		{
+			ID:           types.Int64Unknown(),
+			Name:         types.StringValue("id"),
+			Type:         types.StringValue("BIGINT"),
+			Nullable:     types.BoolValue(false),
+			Description:  types.StringNull(),
+			DefaultValue: types.StringNull(),
+		},
+	})
+	require.False(t, diagnostics.HasError(), diagnostics.Errors())
+	primaryKeys, diagnostics := types.ListValueFrom(ctx, types.StringType, []string{"id"})
+	require.False(t, diagnostics.HasError(), diagnostics.Errors())
+	options, diagnostics := types.MapValueFrom(ctx, types.StringType, map[string]string{"bucket": "2"})
+	require.False(t, diagnostics.HasError(), diagnostics.Errors())
+	planModel := tableResourceModel{
+		ID:            types.StringUnknown(),
+		CatalogID:     types.StringUnknown(),
+		Database:      types.StringValue("analytics"),
+		Name:          types.StringValue("events"),
+		Fields:        fields,
+		PartitionKeys: types.ListValueMust(types.StringType, []attr.Value{}),
+		PrimaryKeys:   primaryKeys,
+		Options:       options,
+		ServerOptions: types.MapUnknown(types.StringType),
+		Comment:       types.StringNull(),
+		SchemaID:      types.Int64Unknown(),
+		Path:          types.StringUnknown(),
+		IsExternal:    types.BoolUnknown(),
+		Owner:         types.StringUnknown(),
+		CreatedAt:     types.Int64Unknown(),
+		CreatedBy:     types.StringUnknown(),
+		UpdatedAt:     types.Int64Unknown(),
+		UpdatedBy:     types.StringUnknown(),
+	}
+	plan := tfsdk.Plan{Schema: schemaResponse.Schema}
+	require.False(t, plan.Set(ctx, &planModel).HasError())
+	createResponse := resource.CreateResponse{State: tfsdk.State{Schema: schemaResponse.Schema}}
+	table.Create(ctx, resource.CreateRequest{Plan: plan}, &createResponse)
+	require.False(t, createResponse.Diagnostics.HasError(), createResponse.Diagnostics.Errors())
+
+	readResponse := resource.ReadResponse{State: createResponse.State}
+	table.Read(ctx, resource.ReadRequest{State: createResponse.State}, &readResponse)
+	require.False(t, readResponse.Diagnostics.HasError(), readResponse.Diagnostics.Errors())
+
+	var updateModel tableResourceModel
+	require.False(t, readResponse.State.Get(ctx, &updateModel).HasError())
+	updateModel.Options = types.MapValueMust(types.StringType, map[string]attr.Value{"bucket": types.StringValue("4")})
+	updatePlan := tfsdk.Plan{Schema: schemaResponse.Schema}
+	require.False(t, updatePlan.Set(ctx, &updateModel).HasError())
+	updateResponse := resource.UpdateResponse{State: tfsdk.State{Schema: schemaResponse.Schema}}
+	table.Update(ctx, resource.UpdateRequest{State: readResponse.State, Plan: updatePlan}, &updateResponse)
+	require.False(t, updateResponse.Diagnostics.HasError(), updateResponse.Diagnostics.Errors())
+
+	deleteResponse := resource.DeleteResponse{State: updateResponse.State}
+	table.Delete(ctx, resource.DeleteRequest{State: updateResponse.State}, &deleteResponse)
+	require.False(t, deleteResponse.Diagnostics.HasError(), deleteResponse.Diagnostics.Errors())
+	assert.Equal(t, 1, createCalls)
+	assert.Equal(t, 3, readCalls)
+	assert.Equal(t, 1, updateCalls)
+	assert.Equal(t, 1, deleteCalls)
+}
+
+func tableFieldForTest(name string, id types.Int64) tableFieldModel {
+	return tableFieldModel{
+		ID:           id,
+		Name:         types.StringValue(name),
+		Type:         types.StringValue("STRING"),
+		Nullable:     types.BoolValue(true),
+		Description:  types.StringNull(),
+		DefaultValue: types.StringNull(),
+	}
 }
