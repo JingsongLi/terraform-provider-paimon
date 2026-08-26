@@ -68,7 +68,7 @@ func (p *paimonProvider) Metadata(_ context.Context, _ provider.MetadataRequest,
 
 func (p *paimonProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Use Terraform to manage databases and tables through an Apache Paimon REST Catalog.",
+		Description: "Use Terraform to manage databases, tables, permissions, and data policies through an Apache Paimon REST Catalog.",
 		Attributes: map[string]schema.Attribute{
 			"uri": schema.StringAttribute{
 				Description: "Base URI of the Paimon REST Catalog server.",
@@ -221,6 +221,9 @@ func (p *paimonProvider) Resources(_ context.Context) []func() resource.Resource
 	return []func() resource.Resource{
 		NewDatabaseResource,
 		NewTableResource,
+		NewPermissionResource,
+		NewRowFilterResource,
+		NewColumnMaskResource,
 	}
 }
 

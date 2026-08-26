@@ -133,6 +133,132 @@ func TestClientTableLifecycleRequests(t *testing.T) {
 	require.NoError(t, api.DropTable(context.Background(), "db", "events"))
 }
 
+func TestClientPermissionManagementRequests(t *testing.T) {
+	expireTime := "2026-09-01T00:00:00.123Z"
+	assignment := PermissionAssignment{
+		Resource:   PermissionResource{Type: ResourceTypeColumn, Database: "analytics", Table: "events"},
+		Access:     PermissionAccessSelect,
+		Principal:  "user:alice@example.com",
+		Columns:    &PermissionColumns{ColumnNames: []string{"event_id", "event_time"}},
+		ExpireTime: &expireTime,
+	}
+	grantCalls, listCalls, revokeCalls := 0, 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/config":
+			writeJSON(t, w, ConfigResponse{Defaults: map[string]string{"prefix": "catalog"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/catalog/permissions/grant":
+			grantCalls++
+			var request PermissionAssignment
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			assert.Equal(t, assignment, request)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/catalog/permissions":
+			listCalls++
+			assert.Equal(t, ResourceTypeColumn, r.URL.Query().Get("resourceType"))
+			assert.Equal(t, "analytics", r.URL.Query().Get("database"))
+			assert.Equal(t, "events", r.URL.Query().Get("table"))
+			assert.Equal(t, PermissionAccessSelect, r.URL.Query().Get("access"))
+			assert.Equal(t, "user:alice@example.com", r.URL.Query().Get("principal"))
+			assert.Equal(t, "2", r.URL.Query().Get("maxResults"))
+			assert.Equal(t, "next/opaque", r.URL.Query().Get("pageToken"))
+			writeJSON(t, w, ListPermissionsResponse{Permissions: []PermissionAssignment{assignment}, NextPageToken: "after"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/catalog/permissions/revoke":
+			revokeCalls++
+			var request struct {
+				Resource  PermissionResource `json:"resource"`
+				Access    string             `json:"access"`
+				Principal string             `json:"principal"`
+			}
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			assert.Equal(t, assignment.Resource, request.Resource)
+			assert.Equal(t, assignment.Access, request.Access)
+			assert.Equal(t, assignment.Principal, request.Principal)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	api, err := New(Config{URI: server.URL})
+	require.NoError(t, err)
+	require.NoError(t, api.GrantPermission(context.Background(), assignment))
+	response, err := api.ListPermissions(context.Background(), ListPermissionsRequest{
+		Resource:   assignment.Resource,
+		Principal:  assignment.Principal,
+		Access:     assignment.Access,
+		PageToken:  "next/opaque",
+		MaxResults: 2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []PermissionAssignment{assignment}, response.Permissions)
+	assert.Equal(t, "after", response.NextPageToken)
+	require.NoError(t, api.RevokePermission(context.Background(), assignment.Resource, assignment.Access, assignment.Principal))
+	assert.Equal(t, 1, grantCalls)
+	assert.Equal(t, 1, listCalls)
+	assert.Equal(t, 1, revokeCalls)
+}
+
+func TestClientPolicyManagementRequests(t *testing.T) {
+	rowRequest := PolicyRequest{RowFilter: &RowFilter{Predicate: `{"field":"tenant_id"}`}, Principal: "role:analyst"}
+	maskRequest := PolicyRequest{ColumnMask: &ColumnMask{OnColumn: "email", Transform: `{"type":"null"}`}, Principal: "role:analyst"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/config":
+			writeJSON(t, w, ConfigResponse{Defaults: map[string]string{"prefix": "catalog"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/catalog/databases/analytics/tables/events/policies":
+			var request PolicyRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			if request.RowFilter != nil {
+				assert.Equal(t, rowRequest, request)
+			} else {
+				assert.Equal(t, maskRequest, request)
+			}
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/catalog/databases/analytics/tables/events/policies":
+			assert.Equal(t, PolicyTypeColumnMasking, r.URL.Query().Get("type"))
+			assert.Equal(t, "role:analyst", r.URL.Query().Get("principal"))
+			assert.Equal(t, "email", r.URL.Query().Get("column"))
+			assert.Equal(t, "page-2", r.URL.Query().Get("pageToken"))
+			assert.Equal(t, "10", r.URL.Query().Get("maxResults"))
+			writeJSON(t, w, ListPoliciesResponse{Policies: []DataPolicy{{
+				Resource:   PermissionResource{Type: ResourceTypeTable, Database: "analytics", Table: "events"},
+				ColumnMask: maskRequest.ColumnMask,
+				Principal:  maskRequest.Principal,
+			}}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/catalog/databases/analytics/tables/events/policies/drop":
+			var request dropPolicyRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			assert.Equal(t, dropPolicyRequest{Type: PolicyTypeColumnMasking, Principal: "role:analyst", Column: "email"}, request)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	api, err := New(Config{URI: server.URL})
+	require.NoError(t, err)
+	require.NoError(t, api.CreatePolicy(context.Background(), "analytics", "events", rowRequest))
+	require.NoError(t, api.CreatePolicy(context.Background(), "analytics", "events", maskRequest))
+	response, err := api.ListPolicies(context.Background(), ListPoliciesRequest{
+		Database:   "analytics",
+		Table:      "events",
+		Type:       PolicyTypeColumnMasking,
+		Principal:  "role:analyst",
+		Column:     "email",
+		PageToken:  "page-2",
+		MaxResults: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, response.Policies, 1)
+	assert.Equal(t, maskRequest.ColumnMask, response.Policies[0].ColumnMask)
+	require.NoError(t, api.DropPolicy(context.Background(), "analytics", "events", PolicyTypeColumnMasking, "role:analyst", "email"))
+}
+
 func TestDataTypeStructuredJSON(t *testing.T) {
 	input := []byte(`{"type":"ROW NOT NULL","fields":[{"id":1,"name":"item","type":{"type":"ARRAY","element":"STRING NOT NULL"}}]}`)
 	var dataType DataType

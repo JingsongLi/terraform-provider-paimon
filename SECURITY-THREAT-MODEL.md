@@ -50,7 +50,9 @@ The provider should:
   instances;
 - sign the exact REST method, resource path, query, body, and required headers;
 - refresh temporary credentials without races or partial credential reuse;
-- bound responses read from REST and credential endpoints.
+- bound responses read from REST and credential endpoints;
+- preserve the exact permission identity and policy attachment selected by the
+  trusted operator without broadening its resource scope or principal.
 
 ## Trusted operator configuration
 
@@ -74,7 +76,9 @@ Examples include:
 - concurrent refresh publishing mixed AK, secret, and STS values;
 - request signing that can be bypassed or that sends credentials to a different
   host than the configured catalog;
-- unbounded provider-owned reads that enable practical memory exhaustion.
+- unbounded provider-owned reads that enable practical memory exhaustion;
+- provider-side permission or policy identity confusion that mutates a broader
+  resource, a different principal, or a different column than configured.
 
 ## Usually out of scope or non-security by default
 
@@ -83,6 +87,8 @@ The following may still be correctness or hardening bugs:
 - unsafe Terraform state backend or execution-environment configuration;
 - an operator intentionally configuring a malicious REST or metadata endpoint;
 - authorization decisions owned by the REST Catalog or Alibaba Cloud RAM;
+- principal lifecycle, principal type and membership resolution, effective
+  permission calculation, and policy enforcement owned by the REST Catalog;
 - resource drift or plan/apply inconsistencies without a trust-boundary breach;
 - a principal obtaining an outcome it could already achieve through legitimate
   provider configuration with the same privileges.

@@ -19,8 +19,8 @@
 
 # Paimon provider
 
-The Paimon provider manages catalog metadata through the Apache Paimon REST
-Catalog API.
+The Paimon provider manages catalog metadata, direct permission assignments,
+and table data policies through the Apache Paimon REST Catalog API.
 
 ## Configuration
 
@@ -77,5 +77,13 @@ signatures are never reused for a different URL.
 
 - [Database resource](resources/database.md)
 - [Table resource](resources/table.md)
+- [Permission resource](resources/permission.md)
+- [Row-filter resource](resources/row_filter.md)
+- [Column-mask resource](resources/column_mask.md)
 - [Database data source](data-sources/database.md)
 - [Table data source](data-sources/table.md)
+
+The permission and policy resources use Paimon's experimental REST management
+contract. Principal lifecycle, type resolution, role membership, persistence,
+and authorization enforcement are server responsibilities. See the
+[permissions example](../examples/permissions/main.tf).
