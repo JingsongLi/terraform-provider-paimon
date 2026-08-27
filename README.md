@@ -36,6 +36,10 @@ Resources:
 - `paimon_database` creates, reads, updates, imports, and drops databases.
 - `paimon_table` creates, reads, imports, updates options/comments, and drops
   managed tables.
+- `paimon_permission` grants, reads, imports, replaces mutable assignment
+  content, and revokes direct catalog permissions.
+- `paimon_row_filter` manages one principal's row filter on a table.
+- `paimon_column_mask` manages one principal's mask on a table column.
 
 Data sources:
 
@@ -95,6 +99,14 @@ resource "paimon_table" "events" {
   }
   comment = "Events managed by Terraform"
 }
+
+resource "paimon_permission" "analyst_read" {
+  resource_type = "TABLE"
+  database      = paimon_table.events.database
+  table         = paimon_table.events.name
+  access        = "SELECT"
+  principal     = "role:analyst"
+}
 ```
 
 ## Lifecycle and safety
@@ -103,11 +115,17 @@ Only the REST metastore is in scope. Filesystem, Hive, and JDBC catalogs are
 not accessed directly because Terraform needs a stable remote control-plane
 contract; Paimon's REST OpenAPI provides that contract.
 
+Permission, row-filter, and column-mask resources use Paimon's experimental
+REST management API. Principal lifecycle and group or role membership remain
+server responsibilities.
+
 ## Import
 
 ```bash
 terraform import paimon_database.analytics analytics
 terraform import paimon_table.events analytics.events
+terraform import paimon_permission.analyst_read \
+  'resource_type=TABLE&database=analytics&table=events&access=SELECT&principal=role%3Aanalyst'
 ```
 
 ## Development

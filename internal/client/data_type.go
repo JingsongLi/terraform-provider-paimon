@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -28,6 +29,17 @@ import (
 
 // Paimon reserves IDs at and above SpecialFields.SYSTEM_FIELD_ID_START.
 const maxPaimonFieldID = (1 << 30) - 2
+
+var (
+	sizedAtomicTypePattern  = regexp.MustCompile(`(?i)^(CHAR|VARCHAR|BINARY|VARBINARY)\s*(?:\(\s*([0-9]+)\s*\))?$`)
+	decimalTypePattern      = regexp.MustCompile(`(?i)^(DECIMAL|DEC|NUMERIC)\s*(?:\(\s*([0-9]+)\s*(?:,\s*([0-9]+)\s*)?\))?$`)
+	timeTypePattern         = regexp.MustCompile(`(?i)^TIME\s*(?:\(\s*([0-9]+)\s*\))?(?:\s+WITHOUT\s+TIME\s+ZONE)?$`)
+	timestampTypePattern    = regexp.MustCompile(`(?i)^TIMESTAMP\s*(?:\(\s*([0-9]+)\s*\))?(?:\s+WITHOUT\s+TIME\s+ZONE)?$`)
+	timestampLTZPattern     = regexp.MustCompile(`(?i)^(?:TIMESTAMP_LTZ\s*(?:\(\s*([0-9]+)\s*\))?|TIMESTAMP\s*(?:\(\s*([0-9]+)\s*\))?\s+WITH\s+LOCAL\s+TIME\s+ZONE)$`)
+	notNullSuffixPattern    = regexp.MustCompile(`(?i)\s+NOT\s+NULL\s*$`)
+	nullSuffixPattern       = regexp.MustCompile(`(?i)\s+NULL\s*$`)
+	suffixCollectionPattern = regexp.MustCompile(`(?i)\s+(ARRAY|MULTISET)\s*$`)
+)
 
 type structuredDataType struct {
 	Type    string             `json:"type"`
@@ -102,7 +114,24 @@ func encodeDataType(input string, nextFieldID *int) (any, error) {
 		return nil, err
 	}
 	if !composite {
-		return strings.TrimSpace(input), nil
+		if matches := suffixCollectionPattern.FindStringSubmatchIndex(typeName); matches != nil {
+			elementType := strings.TrimSpace(typeName[:matches[0]])
+			if elementType == "" {
+				return nil, fmt.Errorf("invalid suffix collection type %q: missing element type", input)
+			}
+			element, err := encodeDataType(elementType, nextFieldID)
+			if err != nil {
+				return nil, err
+			}
+			root := strings.ToUpper(typeName[matches[2]:matches[3]])
+			if notNull {
+				root += " NOT NULL"
+			}
+
+			return structuredDataType{Type: root, Element: element}, nil
+		}
+
+		return canonicalAtomicDataType(input), nil
 	}
 
 	serializedRoot := root
@@ -212,11 +241,214 @@ func canonicalDataType(value DataType) (DataType, error) {
 	return canonical, nil
 }
 
+func canonicalAtomicDataType(input string) string {
+	typeName, notNull := stripNotNull(input)
+	canonical, recognized := canonicalAtomicTypeName(typeName)
+	if !recognized {
+		return strings.TrimSpace(input)
+	}
+	if notNull {
+		canonical += " NOT NULL"
+	}
+
+	return canonical
+}
+
+func canonicalAtomicTypeName(input string) (string, bool) {
+	if matches := sizedAtomicTypePattern.FindStringSubmatch(strings.TrimSpace(input)); matches != nil {
+		length := 1
+		if matches[2] != "" {
+			var valid bool
+			length, valid = boundedInteger(matches[2], 1, 1<<31-1)
+			if !valid {
+				return "", false
+			}
+		}
+		root := strings.ToUpper(matches[1])
+		if root == "VARCHAR" && length == 1<<31-1 {
+			return "STRING", true
+		}
+		if root == "VARBINARY" && length == 1<<31-1 {
+			return "BYTES", true
+		}
+
+		return fmt.Sprintf("%s(%d)", root, length), true
+	}
+	if matches := decimalTypePattern.FindStringSubmatch(strings.TrimSpace(input)); matches != nil {
+		precision, scale := 10, 0
+		if matches[2] != "" {
+			var valid bool
+			precision, valid = boundedInteger(matches[2], 1, 38)
+			if !valid {
+				return "", false
+			}
+		}
+		if matches[3] != "" {
+			var valid bool
+			scale, valid = boundedInteger(matches[3], 0, precision)
+			if !valid {
+				return "", false
+			}
+		}
+
+		return fmt.Sprintf("DECIMAL(%d, %d)", precision, scale), true
+	}
+	if matches := timestampLTZPattern.FindStringSubmatch(strings.TrimSpace(input)); matches != nil {
+		precisionText := matches[1]
+		if precisionText == "" {
+			precisionText = matches[2]
+		}
+		precision := 6
+		if precisionText != "" {
+			var valid bool
+			precision, valid = boundedInteger(precisionText, 0, 9)
+			if !valid {
+				return "", false
+			}
+		}
+
+		return fmt.Sprintf("TIMESTAMP(%d) WITH LOCAL TIME ZONE", precision), true
+	}
+	if matches := timestampTypePattern.FindStringSubmatch(strings.TrimSpace(input)); matches != nil {
+		precision := 6
+		if matches[1] != "" {
+			var valid bool
+			precision, valid = boundedInteger(matches[1], 0, 9)
+			if !valid {
+				return "", false
+			}
+		}
+
+		return fmt.Sprintf("TIMESTAMP(%d)", precision), true
+	}
+	if matches := timeTypePattern.FindStringSubmatch(strings.TrimSpace(input)); matches != nil {
+		precision := 0
+		if matches[1] != "" {
+			var valid bool
+			precision, valid = boundedInteger(matches[1], 0, 9)
+			if !valid {
+				return "", false
+			}
+		}
+
+		return fmt.Sprintf("TIME(%d)", precision), true
+	}
+	if parameters, matched := geospatialTypeParameters(input, "GEOMETRY"); matched {
+		if len(parameters) != 1 {
+			return "", false
+		}
+		crs, valid := canonicalCRS(parameters[0])
+		if !valid {
+			return "", false
+		}
+
+		return "GEOMETRY(" + crs + ")", true
+	}
+	if parameters, matched := geospatialTypeParameters(input, "GEOGRAPHY"); matched {
+		if len(parameters) < 1 || len(parameters) > 2 {
+			return "", false
+		}
+		crs, valid := canonicalCRS(parameters[0])
+		if !valid {
+			return "", false
+		}
+		algorithm := "SPHERICAL"
+		if len(parameters) == 2 {
+			parsed, valid := geospatialParameter(parameters[1])
+			if !valid {
+				return "", false
+			}
+			algorithm = strings.ToUpper(parsed)
+		}
+		switch algorithm {
+		case "SPHERICAL", "VINCENTY", "THOMAS", "ANDOYER", "KARNEY":
+		default:
+			return "", false
+		}
+
+		return "GEOGRAPHY(" + crs + ", " + strings.ToLower(algorithm) + ")", true
+	}
+
+	normalized := strings.ToUpper(strings.Join(strings.Fields(input), " "))
+	switch normalized {
+	case "STRING", "BOOLEAN", "TINYINT", "SMALLINT", "BIGINT", "FLOAT", "DOUBLE", "DATE", "VARIANT", "BLOB", "BYTES":
+		return normalized, true
+	case "INT", "INTEGER":
+		return "INT", true
+	case "DOUBLE PRECISION":
+		return "DOUBLE", true
+	case "GEOMETRY":
+		return "GEOMETRY(OGC:CRS84)", true
+	case "GEOGRAPHY":
+		return "GEOGRAPHY(OGC:CRS84, spherical)", true
+	default:
+		return "", false
+	}
+}
+
+func geospatialTypeParameters(input, root string) ([]string, bool) {
+	trimmed := strings.TrimSpace(input)
+	if len(trimmed) <= len(root) || !strings.EqualFold(trimmed[:len(root)], root) {
+		return nil, false
+	}
+	remainder := strings.TrimSpace(trimmed[len(root):])
+	if len(remainder) < 2 || remainder[0] != '(' || remainder[len(remainder)-1] != ')' {
+		return nil, false
+	}
+	parameters, err := splitTopLevel(remainder[1:len(remainder)-1], ',')
+	if err != nil {
+		return nil, false
+	}
+
+	return parameters, true
+}
+
+func canonicalCRS(input string) (string, bool) {
+	value, valid := geospatialParameter(input)
+	if !valid {
+		return "", false
+	}
+	value = strings.ToUpper(value)
+	if value[0] >= '0' && value[0] <= '9' || strings.ContainsAny(value, " \t\r\n<>() ,.'`") {
+		return "'" + strings.ReplaceAll(value, "'", "''") + "'", true
+	}
+
+	return value, true
+}
+
+func geospatialParameter(input string) (string, bool) {
+	value := strings.TrimSpace(input)
+	if strings.HasPrefix(value, "'") {
+		decoded, err := decodeSQLString(value)
+		if err != nil {
+			return "", false
+		}
+
+		return decoded, decoded != ""
+	}
+	if value == "" || strings.ContainsAny(value, " \t\r\n<>() ,.'`") {
+		return "", false
+	}
+
+	return value, true
+}
+
+func boundedInteger(input string, minimum, maximum int) (int, bool) {
+	value, err := strconv.Atoi(input)
+	if err != nil || value < minimum || value > maximum {
+		return 0, false
+	}
+
+	return value, true
+}
+
 func stripNotNull(input string) (string, bool) {
 	trimmed := strings.TrimSpace(input)
-	const suffix = " NOT NULL"
-	if len(trimmed) >= len(suffix) && strings.EqualFold(trimmed[len(trimmed)-len(suffix):], suffix) {
-		return strings.TrimSpace(trimmed[:len(trimmed)-len(suffix)]), true
+	if suffix := notNullSuffixPattern.FindStringIndex(trimmed); suffix != nil {
+		return strings.TrimSpace(trimmed[:suffix[0]]), true
+	}
+	if suffix := nullSuffixPattern.FindStringIndex(trimmed); suffix != nil {
+		return strings.TrimSpace(trimmed[:suffix[0]]), false
 	}
 
 	return trimmed, false

@@ -19,11 +19,21 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
+	"strings"
+	"time"
 
 	"github.com/apache/terraform-provider-paimon/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+)
+
+const (
+	mutationRecoveryTimeout = 5 * time.Second
+	mutationReadAttempts    = 3
+	mutationReadRetryDelay  = 50 * time.Millisecond
 )
 
 func clientFromProviderData(data any, target **client.Client, diags *diag.Diagnostics, kind string) {
@@ -62,6 +72,16 @@ func stringListFromValue(ctx context.Context, value types.List, diags *diag.Diag
 	return result
 }
 
+func stringSetFromValue(ctx context.Context, value types.Set, diags *diag.Diagnostics) []string {
+	result := make([]string, 0)
+	if value.IsNull() || value.IsUnknown() {
+		return result
+	}
+	diags.Append(value.ElementsAs(ctx, &result, false)...)
+
+	return result
+}
+
 func stringMapValue(ctx context.Context, value map[string]string, diags *diag.Diagnostics) types.Map {
 	if value == nil {
 		value = map[string]string{}
@@ -80,6 +100,64 @@ func stringListValue(ctx context.Context, value []string, diags *diag.Diagnostic
 	diags.Append(newDiags...)
 
 	return result
+}
+
+func stringSetValue(ctx context.Context, value []string, diags *diag.Diagnostics) types.Set {
+	if value == nil {
+		return types.SetNull(types.StringType)
+	}
+	result, newDiags := types.SetValueFrom(ctx, types.StringType, value)
+	diags.Append(newDiags...)
+
+	return result
+}
+
+func equivalentJSON(left, right string) bool {
+	var leftValue, rightValue any
+	leftDecoder := json.NewDecoder(strings.NewReader(left))
+	leftDecoder.UseNumber()
+	rightDecoder := json.NewDecoder(strings.NewReader(right))
+	rightDecoder.UseNumber()
+	if leftDecoder.Decode(&leftValue) != nil || rightDecoder.Decode(&rightValue) != nil || !json.Valid([]byte(left)) || !json.Valid([]byte(right)) {
+		return left == right
+	}
+
+	return reflect.DeepEqual(leftValue, rightValue)
+}
+
+func mutationRecoveryContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	// A canceled apply context can still follow a mutation that committed remotely.
+	// Keep request-scoped values, but give reconciliation and repair a fresh bound.
+	return context.WithTimeout(context.WithoutCancel(ctx), mutationRecoveryTimeout)
+}
+
+func retryLookup[T any](ctx context.Context, lookup func(context.Context) (T, bool, error)) (T, bool, error) {
+	var zero T
+	var lastErr error
+	for attempt := 0; attempt < mutationReadAttempts; attempt++ {
+		value, found, err := lookup(ctx)
+		if err == nil {
+			lastErr = nil
+			if found {
+				return value, true, nil
+			}
+		} else {
+			lastErr = err
+		}
+		if attempt == mutationReadAttempts-1 {
+			break
+		}
+		timer := time.NewTimer(mutationReadRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+
+			return zero, false, ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	return zero, false, lastErr
 }
 
 func syncManagedOptions(ctx context.Context, managed types.Map, remote map[string]string, diags *diag.Diagnostics) types.Map {

@@ -302,7 +302,7 @@ func TestTableResourceLifecycle(t *testing.T) {
 		Schema: client.Schema{
 			Fields: []client.Field{
 				{ID: 0, Name: "id", Type: client.DataType("BIGINT NOT NULL")},
-				{ID: 1, Name: "labels", Type: client.DataType("MAP<STRING, STRING>")},
+				{ID: 1, Name: "labels", Type: client.DataType("MAP<INT, STRING>")},
 				{ID: 2, Name: "payload", Type: client.DataType("ROW<`item` STRING>")},
 			},
 			PartitionKeys: []string{},
@@ -367,7 +367,7 @@ func TestTableResourceLifecycle(t *testing.T) {
 		{
 			ID:           types.Int64Unknown(),
 			Name:         types.StringValue("labels"),
-			Type:         types.StringValue("MAP<STRING,STRING>"),
+			Type:         types.StringValue("MAP<INTEGER,STRING>"),
 			Nullable:     types.BoolValue(true),
 			Description:  types.StringNull(),
 			DefaultValue: types.StringNull(),
@@ -416,7 +416,7 @@ func TestTableResourceLifecycle(t *testing.T) {
 	var createdFields []tableFieldModel
 	require.False(t, createdModel.Fields.ElementsAs(ctx, &createdFields, false).HasError())
 	require.Len(t, createdFields, 3)
-	assert.Equal(t, "MAP<STRING,STRING>", createdFields[1].Type.ValueString())
+	assert.Equal(t, "MAP<INTEGER,STRING>", createdFields[1].Type.ValueString())
 	assert.Equal(t, "ROW<`item` STRING>", createdFields[2].Type.ValueString())
 
 	readResponse := resource.ReadResponse{State: createResponse.State}
@@ -428,7 +428,7 @@ func TestTableResourceLifecycle(t *testing.T) {
 	var refreshedFields []tableFieldModel
 	require.False(t, updateModel.Fields.ElementsAs(ctx, &refreshedFields, false).HasError())
 	require.Len(t, refreshedFields, 3)
-	assert.Equal(t, "MAP<STRING,STRING>", refreshedFields[1].Type.ValueString())
+	assert.Equal(t, "MAP<INTEGER,STRING>", refreshedFields[1].Type.ValueString())
 	assert.Equal(t, "ROW<`item` STRING>", refreshedFields[2].Type.ValueString())
 	updateModel.Options = types.MapValueMust(types.StringType, map[string]attr.Value{"bucket": types.StringValue("4")})
 	updatePlan := tfsdk.Plan{Schema: schemaResponse.Schema}
