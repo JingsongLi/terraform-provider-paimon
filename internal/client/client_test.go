@@ -367,6 +367,37 @@ func TestEquivalentDataTypesNormalizesCompositeSpelling(t *testing.T) {
 	assert.False(t, EquivalentDataTypes(DataType("MAP<STRING, STRING>"), DataType("MAP<STRING, BIGINT>")))
 }
 
+func TestEquivalentDataTypesNormalizesServerAcceptedAtomicSpelling(t *testing.T) {
+	for _, test := range []struct {
+		configured DataType
+		canonical  DataType
+	}{
+		{configured: "INTEGER", canonical: "INT"},
+		{configured: "integer", canonical: "INT"},
+		{configured: "integer not  null", canonical: "INT NOT NULL"},
+		{configured: "DEC", canonical: "DECIMAL(10, 0)"},
+		{configured: "NUMERIC(12)", canonical: "DECIMAL(12, 0)"},
+		{configured: "DOUBLE PRECISION", canonical: "DOUBLE"},
+		{configured: "CHAR", canonical: "CHAR(1)"},
+		{configured: "VARCHAR", canonical: "VARCHAR(1)"},
+		{configured: "BYTES", canonical: "VARBINARY(2147483647)"},
+		{configured: "TIME", canonical: "TIME(0)"},
+		{configured: "TIMESTAMP", canonical: "TIMESTAMP(6)"},
+		{configured: "TIMESTAMP NULL", canonical: "TIMESTAMP(6)"},
+		{configured: "TIMESTAMP_LTZ", canonical: "TIMESTAMP(6) WITH LOCAL TIME ZONE"},
+		{configured: "geometry(ogc:crs84) not null", canonical: "GEOMETRY(OGC:CRS84) NOT NULL"},
+		{configured: "GEOGRAPHY(EPSG:4326)", canonical: "GEOGRAPHY(EPSG:4326, spherical)"},
+		{configured: "geography('epsg:4326', 'KARNEY')", canonical: "GEOGRAPHY(EPSG:4326, karney)"},
+		{configured: "MAP<integer, ARRAY<dec>>", canonical: "MAP<INT, ARRAY<DECIMAL(10, 0)>>"},
+		{configured: "INTEGER ARRAY", canonical: "ARRAY<INT>"},
+		{configured: "integer not null array not null", canonical: "ARRAY<INT NOT NULL> NOT NULL"},
+	} {
+		t.Run(string(test.configured), func(t *testing.T) {
+			assert.True(t, EquivalentDataTypes(test.configured, test.canonical))
+		})
+	}
+}
+
 func TestDataTypeMarshalKeepsComparisonInNestedRowDefault(t *testing.T) {
 	encoded, err := json.Marshal(DataType("ROW<nested ROW<flag BOOLEAN DEFAULT 1 > 0>, tail BOOLEAN DEFAULT 1 < 2>"))
 	require.NoError(t, err)

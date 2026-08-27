@@ -20,10 +20,8 @@ package provider
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/url"
-	"unicode/utf8"
 
 	"github.com/apache/terraform-provider-paimon/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -660,14 +658,6 @@ func validateSerializedPolicy(name, value string, diags *diag.Diagnostics) {
 	}
 }
 
-func nonEmptyStringValidators() []validator.String {
-	return []validator.String{stringvalidator.LengthAtLeast(1)}
-}
-
-func principalValidators() []validator.String {
-	return []validator.String{stringvalidator.UTF8LengthBetween(1, 128)}
-}
-
 func rowFilterID(model rowFilterResourceModel) string {
 	return policyID(model.Database.ValueString(), model.Table.ValueString(), model.Principal.ValueString(), "")
 }
@@ -697,8 +687,8 @@ func parsePolicyID(id string, columnRequired bool) (url.Values, error) {
 	if err != nil {
 		return nil, err
 	}
-	if utf8.RuneCountInString(values.Get("principal")) > 128 {
-		return nil, errors.New("principal must contain at most 128 characters")
+	if err := validateManagementPrincipal(values.Get("principal")); err != nil {
+		return nil, err
 	}
 
 	return values, nil

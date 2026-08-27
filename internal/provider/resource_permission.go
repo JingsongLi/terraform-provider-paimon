@@ -25,7 +25,6 @@ import (
 	"regexp"
 	"sort"
 	"time"
-	"unicode/utf8"
 
 	"github.com/apache/terraform-provider-paimon/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
@@ -113,11 +112,11 @@ func (r *permissionResource) Metadata(_ context.Context, req resource.MetadataRe
 
 func (r *permissionResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	replace := []planmodifier.String{stringplanmodifier.RequiresReplace()}
-	nonEmptyOptional := []validator.String{stringvalidator.LengthAtLeast(1)}
+	nonEmptyOptional := nonEmptyStringValidators()
 	columnValidators := []validator.Set{
 		setvalidator.SizeAtLeast(1),
 		setvalidator.NoNullValues(),
-		setvalidator.ValueStringsAre(stringvalidator.LengthAtLeast(1)),
+		setvalidator.ValueStringsAre(nonBlankStringValidator{}),
 	}
 	resp.Schema = schema.Schema{
 		Description: "Manages one direct permission assignment in a Paimon REST Catalog. The management API is experimental in Paimon.",
@@ -166,7 +165,7 @@ func (r *permissionResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			"principal": schema.StringAttribute{
 				Description:   "Opaque canonical principal identifier resolved by the REST server.",
 				Required:      true,
-				Validators:    []validator.String{stringvalidator.UTF8LengthBetween(1, 128)},
+				Validators:    principalValidators(),
 				PlanModifiers: replace,
 			},
 			"column_names": schema.SetAttribute{
@@ -597,8 +596,8 @@ func parsePermissionID(id string) (permissionResourceModel, error) {
 		ColumnNames:         types.SetUnknown(types.StringType),
 		ExcludedColumnNames: types.SetUnknown(types.StringType),
 	}
-	if utf8.RuneCountInString(model.Principal.ValueString()) > 128 {
-		return permissionResourceModel{}, errors.New("principal must contain at most 128 characters")
+	if err := validateManagementPrincipal(model.Principal.ValueString()); err != nil {
+		return permissionResourceModel{}, err
 	}
 	var diags diag.Diagnostics
 	validatePermissionModel(model, &diags)
@@ -625,12 +624,12 @@ func parseIdentityQuery(id string, allowed, required []string) (url.Values, erro
 		if len(entries) != 1 {
 			return nil, fmt.Errorf("identifier key %q must appear exactly once", name)
 		}
-		if entries[0] == "" {
+		if isManagementBlank(entries[0]) {
 			return nil, fmt.Errorf("identifier key %q cannot be empty", name)
 		}
 	}
 	for _, name := range required {
-		if values.Get(name) == "" {
+		if isManagementBlank(values.Get(name)) {
 			return nil, fmt.Errorf("identifier must contain non-empty key %q", name)
 		}
 	}

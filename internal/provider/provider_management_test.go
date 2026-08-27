@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -401,7 +402,7 @@ func TestValidateSerializedPolicy(t *testing.T) {
 	assert.False(t, equivalentJSON(`{"literal":9007199254740992}`, `{"literal":9007199254740993}`))
 }
 
-func TestPrincipalValidatorsCountUnicodeCharacters(t *testing.T) {
+func TestPrincipalValidatorsMatchJavaContract(t *testing.T) {
 	ctx := context.Background()
 	var permissionSchemaResponse resource.SchemaResponse
 	(&permissionResource{}).Schema(ctx, resource.SchemaRequest{}, &permissionSchemaResponse)
@@ -423,6 +424,9 @@ func TestPrincipalValidatorsCountUnicodeCharacters(t *testing.T) {
 			}{
 				{principal: strings.Repeat("界", 128)},
 				{principal: strings.Repeat("界", 129), hasError: true},
+				{principal: strings.Repeat("😀", 64)},
+				{principal: strings.Repeat("😀", 65), hasError: true},
+				{principal: " \t", hasError: true},
 			} {
 				var diagnostics diag.Diagnostics
 				for _, configuredValidator := range test.validators {
@@ -434,6 +438,79 @@ func TestPrincipalValidatorsCountUnicodeCharacters(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestManagementSchemasRejectWhitespaceOnlyIdentifiers(t *testing.T) {
+	ctx := context.Background()
+	assertRejectsWhitespace := func(t *testing.T, validators []schemavalidator.String) {
+		t.Helper()
+		var diagnostics diag.Diagnostics
+		for _, configuredValidator := range validators {
+			response := schemavalidator.StringResponse{}
+			configuredValidator.ValidateString(ctx, schemavalidator.StringRequest{ConfigValue: types.StringValue(" \t")}, &response)
+			diagnostics.Append(response.Diagnostics...)
+		}
+		assert.True(t, diagnostics.HasError())
+	}
+
+	var permissionSchemaResponse resource.SchemaResponse
+	(&permissionResource{}).Schema(ctx, resource.SchemaRequest{}, &permissionSchemaResponse)
+	for _, name := range []string{"database", "table", "function", "view"} {
+		attribute, ok := permissionSchemaResponse.Schema.Attributes[name].(resourceschema.StringAttribute)
+		require.True(t, ok)
+		t.Run("permission_"+name, func(t *testing.T) {
+			assertRejectsWhitespace(t, attribute.Validators)
+		})
+	}
+	for _, name := range []string{"column_names", "excluded_column_names"} {
+		attribute, ok := permissionSchemaResponse.Schema.Attributes[name].(resourceschema.SetAttribute)
+		require.True(t, ok)
+		var diagnostics diag.Diagnostics
+		for _, configuredValidator := range attribute.Validators {
+			response := schemavalidator.SetResponse{}
+			configuredValidator.ValidateSet(ctx, schemavalidator.SetRequest{
+				ConfigValue: types.SetValueMust(types.StringType, []attr.Value{types.StringValue(" \t")}),
+			}, &response)
+			diagnostics.Append(response.Diagnostics...)
+		}
+		t.Run("permission_"+name, func(t *testing.T) {
+			assert.True(t, diagnostics.HasError())
+		})
+	}
+
+	var rowFilterSchemaResponse resource.SchemaResponse
+	(&rowFilterResource{}).Schema(ctx, resource.SchemaRequest{}, &rowFilterSchemaResponse)
+	for _, name := range []string{"database", "table"} {
+		attribute, ok := rowFilterSchemaResponse.Schema.Attributes[name].(resourceschema.StringAttribute)
+		require.True(t, ok)
+		t.Run("row_filter_"+name, func(t *testing.T) {
+			assertRejectsWhitespace(t, attribute.Validators)
+		})
+	}
+
+	var columnMaskSchemaResponse resource.SchemaResponse
+	(&columnMaskResource{}).Schema(ctx, resource.SchemaRequest{}, &columnMaskSchemaResponse)
+	for _, name := range []string{"database", "table", "column"} {
+		attribute, ok := columnMaskSchemaResponse.Schema.Attributes[name].(resourceschema.StringAttribute)
+		require.True(t, ok)
+		t.Run("column_mask_"+name, func(t *testing.T) {
+			assertRejectsWhitespace(t, attribute.Validators)
+		})
+	}
+}
+
+func TestManagementImportIDsMatchJavaBlankAndPrincipalLengthContract(t *testing.T) {
+	_, err := parsePermissionID("resource_type=TABLE&database=%20&table=events&access=SELECT&principal=alice")
+	require.Error(t, err)
+	_, err = parsePermissionID("resource_type=TABLE&database=analytics&table=events&access=SELECT&principal=%20%09")
+	require.Error(t, err)
+	_, err = parsePermissionID("resource_type=TABLE&database=analytics&table=events&access=SELECT&principal=" + url.QueryEscape(strings.Repeat("😀", 65)))
+	require.Error(t, err)
+
+	_, err = parsePolicyID("database=analytics&table=%20&principal=alice", false)
+	require.Error(t, err)
+	_, err = parsePolicyID("database=analytics&table=events&principal="+url.QueryEscape(strings.Repeat("😀", 65)), false)
+	require.Error(t, err)
 }
 
 func TestPermissionCreateRetainsStateWhenReconciliationFails(t *testing.T) {
