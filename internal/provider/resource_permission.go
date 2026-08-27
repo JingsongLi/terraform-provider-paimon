@@ -181,7 +181,7 @@ func (r *permissionResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				Validators:  columnValidators,
 			},
 			"expire_time": schema.StringAttribute{
-				Description: "Optional exclusive authorization upper bound as a UTC ISO-8601 instant with a Z suffix. Fractional digits are accepted only when the parsed instant resolves exactly to milliseconds.",
+				Description: "Optional exclusive authorization upper bound as a UTC ISO-8601 instant with a Z suffix. Fractional digits are accepted only when the parsed instant resolves exactly to milliseconds; equivalent spellings are normalized to the canonical wire format.",
 				Optional:    true,
 			},
 		},
@@ -421,6 +421,14 @@ func permissionAssignmentFromModel(ctx context.Context, model permissionResource
 		Principal:  model.Principal.ValueString(),
 		ExpireTime: optionalStringPointer(model.ExpireTime),
 	}
+	if assignment.ExpireTime != nil {
+		canonical, err := canonicalPermissionExpireTime(*assignment.ExpireTime)
+		if err != nil {
+			diags.AddError("Invalid Paimon permission expiry", err.Error())
+		} else {
+			assignment.ExpireTime = &canonical
+		}
+	}
 	if model.ResourceType.ValueString() == client.ResourceTypeColumn {
 		assignment.Columns = &client.PermissionColumns{}
 		if !model.ColumnNames.IsNull() {
@@ -530,6 +538,15 @@ func parsePermissionExpireTime(value string) (time.Time, error) {
 	}
 
 	return instant, nil
+}
+
+func canonicalPermissionExpireTime(value string) (string, error) {
+	instant, err := parsePermissionExpireTime(value)
+	if err != nil {
+		return "", err
+	}
+
+	return instant.UTC().Format(time.RFC3339Nano), nil
 }
 
 func permissionIdentityUnknown(model permissionResourceModel) bool {

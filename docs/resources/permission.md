@@ -81,7 +81,9 @@ must enable `query-auth.enabled=true` before a column assignment is granted.
 `expire_time` is optional. It must be a UTC ISO-8601 instant with a `Z` suffix.
 Fractional seconds may contain up to nine digits, but the parsed value must
 resolve exactly to milliseconds: `.123000Z` is valid and `.123456Z` is not.
-Expiry is an exclusive upper bound evaluated by the server clock.
+Equivalent spellings are normalized to upper-case `T`/`Z` with no more than
+three fractional digits before they are sent to the server. Expiry is an
+exclusive upper bound evaluated by the server clock.
 
 Import with the URL-query identity printed in `id`:
 

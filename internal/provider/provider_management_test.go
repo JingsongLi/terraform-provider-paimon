@@ -69,7 +69,7 @@ func TestPermissionResourceLifecycle(t *testing.T) {
 			} else {
 				listed := *remote
 				if listed.ExpireTime != nil {
-					canonical := "2026-09-01T00:00:00.000Z"
+					canonical := "2026-09-01T00:00:00.123Z"
 					listed.ExpireTime = &canonical
 				}
 				require.NoError(t, json.NewEncoder(w).Encode(client.ListPermissionsResponse{Permissions: []client.PermissionAssignment{listed}}))
@@ -116,7 +116,7 @@ func TestPermissionResourceLifecycle(t *testing.T) {
 
 	created.ColumnNames = types.SetNull(types.StringType)
 	created.ExcludedColumnNames = types.SetValueMust(types.StringType, []attr.Value{types.StringValue("secret")})
-	created.ExpireTime = types.StringValue("2026-09-01T00:00:00Z")
+	created.ExpireTime = types.StringValue("2026-09-01t00:00:00.123000z")
 	updatePlan := tfsdk.Plan{Schema: schemaResponse.Schema}
 	require.False(t, updatePlan.Set(ctx, &created).HasError())
 	updateResponse := resource.UpdateResponse{State: tfsdk.State{Schema: schemaResponse.Schema}}
@@ -124,12 +124,12 @@ func TestPermissionResourceLifecycle(t *testing.T) {
 	require.False(t, updateResponse.Diagnostics.HasError(), updateResponse.Diagnostics.Errors())
 	var updated permissionResourceModel
 	require.False(t, updateResponse.State.Get(ctx, &updated).HasError())
-	assert.Equal(t, "2026-09-01T00:00:00Z", updated.ExpireTime.ValueString())
+	assert.Equal(t, "2026-09-01t00:00:00.123000z", updated.ExpireTime.ValueString())
 	require.NotNil(t, remote.Columns)
 	assert.Nil(t, remote.Columns.ColumnNames)
 	assert.Equal(t, []string{"secret"}, remote.Columns.ExcludedColumnNames)
 	require.NotNil(t, remote.ExpireTime)
-	assert.Equal(t, "2026-09-01T00:00:00Z", *remote.ExpireTime)
+	assert.Equal(t, "2026-09-01T00:00:00.123Z", *remote.ExpireTime)
 
 	deleteResponse := resource.DeleteResponse{State: updateResponse.State}
 	managed.Delete(ctx, resource.DeleteRequest{State: updateResponse.State}, &deleteResponse)
@@ -443,6 +443,11 @@ func TestPermissionExpiryValidationUsesParsedMillisecondPrecision(t *testing.T) 
 	model := base
 	model.ExpireTime = types.StringValue(expectedExpiry)
 	var diagnostics diag.Diagnostics
+	wireAssignment := permissionAssignmentFromModel(context.Background(), model, &diagnostics)
+	require.False(t, diagnostics.HasError())
+	require.NotNil(t, wireAssignment.ExpireTime)
+	assert.Equal(t, "2027-01-01T00:00:00.123Z", *wireAssignment.ExpireTime)
+
 	setPermissionModel(context.Background(), &model, observed, &diagnostics)
 	require.False(t, diagnostics.HasError())
 	assert.Equal(t, expectedExpiry, model.ExpireTime.ValueString())
@@ -581,6 +586,10 @@ func TestPermissionCreateRetainsStateWhenReconciliationFails(t *testing.T) {
 		case request.Method == http.MethodGet && request.URL.Path == "/v1/config":
 			require.NoError(t, json.NewEncoder(w).Encode(client.ConfigResponse{Defaults: map[string]string{"prefix": "catalog"}}))
 		case request.Method == http.MethodPost && request.URL.Path == "/v1/catalog/permissions/grant":
+			var assignment client.PermissionAssignment
+			require.NoError(t, json.NewDecoder(request.Body).Decode(&assignment))
+			require.NotNil(t, assignment.ExpireTime)
+			assert.Equal(t, "2027-01-01T00:00:00.123Z", *assignment.ExpireTime)
 			w.WriteHeader(http.StatusOK)
 		case request.Method == http.MethodGet && request.URL.Path == "/v1/catalog/permissions":
 			listCalls++
@@ -608,7 +617,7 @@ func TestPermissionCreateRetainsStateWhenReconciliationFails(t *testing.T) {
 		Principal:           types.StringValue("role:analyst"),
 		ColumnNames:         types.SetNull(types.StringType),
 		ExcludedColumnNames: types.SetNull(types.StringType),
-		ExpireTime:          types.StringNull(),
+		ExpireTime:          types.StringValue("2027-01-01t00:00:00.123000z"),
 	}
 	plan := tfsdk.Plan{Schema: schemaResponse.Schema}
 	require.False(t, plan.Set(ctx, &planModel).HasError())
@@ -618,6 +627,7 @@ func TestPermissionCreateRetainsStateWhenReconciliationFails(t *testing.T) {
 	var retained permissionResourceModel
 	require.False(t, response.State.Get(ctx, &retained).HasError())
 	assert.Equal(t, permissionID(planModel), retained.ID.ValueString())
+	assert.Equal(t, "2027-01-01t00:00:00.123000z", retained.ExpireTime.ValueString())
 	assert.Equal(t, 3, listCalls)
 }
 
@@ -668,7 +678,7 @@ func TestPermissionCreateReconcilesLostResponse(t *testing.T) {
 		Principal:           types.StringValue("role:analyst"),
 		ColumnNames:         types.SetNull(types.StringType),
 		ExcludedColumnNames: types.SetNull(types.StringType),
-		ExpireTime:          types.StringNull(),
+		ExpireTime:          types.StringValue("2027-01-01t00:00:00.123000z"),
 	}
 	plan := tfsdk.Plan{Schema: schemaResponse.Schema}
 	require.False(t, plan.Set(ctx, &planModel).HasError())
@@ -679,6 +689,12 @@ func TestPermissionCreateReconcilesLostResponse(t *testing.T) {
 	var recovered permissionResourceModel
 	require.False(t, response.State.Get(ctx, &recovered).HasError())
 	assert.Equal(t, permissionID(planModel), recovered.ID.ValueString())
+	assert.Equal(t, "2027-01-01t00:00:00.123000z", recovered.ExpireTime.ValueString())
+	mu.Lock()
+	remoteExpiry := remote.ExpireTime
+	mu.Unlock()
+	require.NotNil(t, remoteExpiry)
+	assert.Equal(t, "2027-01-01T00:00:00.123Z", *remoteExpiry)
 }
 
 func TestRowFilterCreateRetainsStateWhenReconciliationFails(t *testing.T) {
