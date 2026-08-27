@@ -389,6 +389,65 @@ func TestPermissionValidationAndImportIdentifiers(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestPermissionExpiryValidationUsesParsedMillisecondPrecision(t *testing.T) {
+	base := permissionResourceModel{
+		ResourceType:        types.StringValue(client.ResourceTypeTable),
+		Database:            types.StringValue("analytics"),
+		Table:               types.StringValue("events"),
+		Function:            types.StringNull(),
+		View:                types.StringNull(),
+		Access:              types.StringValue(client.PermissionAccessSelect),
+		Principal:           types.StringValue("role:analyst"),
+		ColumnNames:         types.SetNull(types.StringType),
+		ExcludedColumnNames: types.SetNull(types.StringType),
+	}
+	for _, test := range []struct {
+		name     string
+		value    string
+		hasError bool
+	}{
+		{name: "whole seconds", value: "2027-01-01T00:00:00Z"},
+		{name: "tenths", value: "2027-01-01T00:00:00.1Z"},
+		{name: "hundredths", value: "2027-01-01T00:00:00.12Z"},
+		{name: "canonical milliseconds", value: "2027-01-01T00:00:00.123Z"},
+		{name: "trailing fractional zeros", value: "2027-01-01T00:00:00.123000Z"},
+		{name: "nanosecond-width trailing zeros", value: "2027-01-01T00:00:00.123000000Z"},
+		{name: "lower-case separators", value: "2027-01-01t00:00:00.123000z"},
+		{name: "numeric offset is not portable across supported JDKs", value: "2027-01-01T01:00:00.123+01:00", hasError: true},
+		{name: "microsecond precision", value: "2027-01-01T00:00:00.123456Z", hasError: true},
+		{name: "nanosecond precision", value: "2027-01-01T00:00:00.123000001Z", hasError: true},
+		{name: "too many fractional digits", value: "2027-01-01T00:00:00.1230000000Z", hasError: true},
+		{name: "invalid instant", value: "2027-02-29T00:00:00Z", hasError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := base
+			model.ExpireTime = types.StringValue(test.value)
+			var diagnostics diag.Diagnostics
+			validatePermissionModel(model, &diagnostics)
+			assert.Equal(t, test.hasError, diagnostics.HasError())
+		})
+	}
+
+	expectedExpiry := "2027-01-01t00:00:00.123000z"
+	observedExpiry := "2027-01-01T00:00:00.123Z"
+	assignment := client.PermissionAssignment{
+		Resource:   client.PermissionResource{Type: client.ResourceTypeTable, Database: "analytics", Table: "events"},
+		Access:     client.PermissionAccessSelect,
+		Principal:  "role:analyst",
+		ExpireTime: &expectedExpiry,
+	}
+	observed := assignment
+	observed.ExpireTime = &observedExpiry
+	assert.True(t, permissionAssignmentsEquivalent(assignment, observed))
+
+	model := base
+	model.ExpireTime = types.StringValue(expectedExpiry)
+	var diagnostics diag.Diagnostics
+	setPermissionModel(context.Background(), &model, observed, &diagnostics)
+	require.False(t, diagnostics.HasError())
+	assert.Equal(t, expectedExpiry, model.ExpireTime.ValueString())
+}
+
 func TestValidateSerializedPolicy(t *testing.T) {
 	var diagnostics diag.Diagnostics
 	validateSerializedPolicy("predicate", `{invalid`, &diagnostics)

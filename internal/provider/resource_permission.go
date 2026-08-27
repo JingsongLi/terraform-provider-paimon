@@ -82,7 +82,7 @@ var permissionAccessesByResource = map[string]map[string]bool{
 	client.ResourceTypeFunction:    accessSet(client.PermissionAccessAll, client.PermissionAccessSelect, client.PermissionAccessAlter, client.PermissionAccessDrop, client.PermissionAccessGrant),
 }
 
-var expireTimePattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$`)
+var expireTimePattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?[Zz]$`)
 
 type permissionResource struct {
 	client *client.Client
@@ -181,7 +181,7 @@ func (r *permissionResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				Validators:  columnValidators,
 			},
 			"expire_time": schema.StringAttribute{
-				Description: "Optional exclusive authorization upper bound as a UTC ISO-8601 instant with at most millisecond precision.",
+				Description: "Optional exclusive authorization upper bound as a UTC ISO-8601 instant with a Z suffix. Fractional digits are accepted only when the parsed instant resolves exactly to milliseconds.",
 				Optional:    true,
 			},
 		},
@@ -462,8 +462,8 @@ func setPermissionModel(ctx context.Context, model *permissionResourceModel, ass
 	configuredExpireTime := model.ExpireTime
 	model.ExpireTime = stringValueFromPointer(assignment.ExpireTime)
 	if assignment.ExpireTime != nil && !configuredExpireTime.IsNull() && !configuredExpireTime.IsUnknown() {
-		configured, configuredErr := time.Parse(time.RFC3339Nano, configuredExpireTime.ValueString())
-		remote, remoteErr := time.Parse(time.RFC3339Nano, *assignment.ExpireTime)
+		configured, configuredErr := parsePermissionExpireTime(configuredExpireTime.ValueString())
+		remote, remoteErr := parsePermissionExpireTime(*assignment.ExpireTime)
 		if configuredErr == nil && remoteErr == nil && configured.Equal(remote) {
 			model.ExpireTime = configuredExpireTime
 		}
@@ -507,13 +507,29 @@ func validatePermissionModel(model permissionResourceModel, diags *diag.Diagnost
 		}
 	}
 	if !model.ExpireTime.IsNull() && !model.ExpireTime.IsUnknown() {
-		value := model.ExpireTime.ValueString()
-		if !expireTimePattern.MatchString(value) {
-			diags.AddError("Invalid Paimon permission expiry", "expire_time must be a UTC ISO-8601 instant ending in Z with at most three fractional-second digits.")
-		} else if _, err := time.Parse(time.RFC3339Nano, value); err != nil {
-			diags.AddError("Invalid Paimon permission expiry", fmt.Sprintf("expire_time is not a valid instant: %s", err))
+		if _, err := parsePermissionExpireTime(model.ExpireTime.ValueString()); err != nil {
+			diags.AddError("Invalid Paimon permission expiry", err.Error())
 		}
 	}
+}
+
+func parsePermissionExpireTime(value string) (time.Time, error) {
+	if !expireTimePattern.MatchString(value) {
+		return time.Time{}, errors.New("expire_time must be a UTC ISO-8601 instant ending in Z with no more than nine fractional-second digits")
+	}
+
+	normalized := []byte(value)
+	normalized[10] = 'T'
+	normalized[len(normalized)-1] = 'Z'
+	instant, err := time.Parse(time.RFC3339Nano, string(normalized))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("expire_time is not a valid instant: %s", err)
+	}
+	if instant.Nanosecond()%int(time.Millisecond) != 0 {
+		return time.Time{}, errors.New("expire_time must resolve exactly to millisecond precision")
+	}
+
+	return instant, nil
 }
 
 func permissionIdentityUnknown(model permissionResourceModel) bool {
@@ -540,8 +556,8 @@ func permissionAssignmentsEquivalent(expected, observed client.PermissionAssignm
 	if expected.ExpireTime == nil {
 		return true
 	}
-	expectedTime, expectedErr := time.Parse(time.RFC3339Nano, *expected.ExpireTime)
-	observedTime, observedErr := time.Parse(time.RFC3339Nano, *observed.ExpireTime)
+	expectedTime, expectedErr := parsePermissionExpireTime(*expected.ExpireTime)
+	observedTime, observedErr := parsePermissionExpireTime(*observed.ExpireTime)
 	if expectedErr == nil && observedErr == nil {
 		return expectedTime.Equal(observedTime)
 	}

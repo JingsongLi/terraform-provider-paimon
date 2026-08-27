@@ -78,9 +78,10 @@ resource "paimon_permission" "limited_event_columns" {
 `excluded_column_names` is a denylist and allows columns added later. The table
 must enable `query-auth.enabled=true` before a column assignment is granted.
 
-`expire_time` is optional. It must be UTC with a `Z` suffix and at most
-millisecond precision; expiry is an exclusive upper bound evaluated by the
-server clock.
+`expire_time` is optional. It must be a UTC ISO-8601 instant with a `Z` suffix.
+Fractional seconds may contain up to nine digits, but the parsed value must
+resolve exactly to milliseconds: `.123000Z` is valid and `.123456Z` is not.
+Expiry is an exclusive upper bound evaluated by the server clock.
 
 Import with the URL-query identity printed in `id`:
 
