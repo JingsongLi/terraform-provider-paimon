@@ -20,6 +20,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"unicode/utf8"
@@ -645,17 +646,17 @@ func replacePolicyWithReconciliation(ctx context.Context, api *client.Client, pr
 
 func validateSerializedPolicy(name, value string, diags *diag.Diagnostics) {
 	if value == "" {
-		diags.AddError("Invalid Paimon policy JSON", fmt.Sprintf("%s cannot be empty.", name))
+		diags.AddError("Invalid Paimon policy JSON", name+" cannot be empty.")
 
 		return
 	}
 	if len([]byte(value)) > maxSerializedPolicyBytes {
-		diags.AddError("Invalid Paimon policy JSON", fmt.Sprintf("%s must not exceed 60 KiB in UTF-8.", name))
+		diags.AddError("Invalid Paimon policy JSON", name+" must not exceed 60 KiB in UTF-8.")
 
 		return
 	}
 	if !json.Valid([]byte(value)) {
-		diags.AddError("Invalid Paimon policy JSON", fmt.Sprintf("%s must contain a valid serialized Paimon JSON value.", name))
+		diags.AddError("Invalid Paimon policy JSON", name+" must contain a valid serialized Paimon JSON value.")
 	}
 }
 
@@ -697,7 +698,7 @@ func parsePolicyID(id string, columnRequired bool) (url.Values, error) {
 		return nil, err
 	}
 	if utf8.RuneCountInString(values.Get("principal")) > 128 {
-		return nil, fmt.Errorf("principal must contain at most 128 characters")
+		return nil, errors.New("principal must contain at most 128 characters")
 	}
 
 	return values, nil

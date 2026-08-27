@@ -399,7 +399,6 @@ func TestValidateSerializedPolicy(t *testing.T) {
 
 	assert.True(t, equivalentJSON(`{"a":1,"b":2}`, `{"b":2,"a":1}`))
 	assert.False(t, equivalentJSON(`{"literal":9007199254740992}`, `{"literal":9007199254740993}`))
-
 }
 
 func TestPrincipalValidatorsCountUnicodeCharacters(t *testing.T) {

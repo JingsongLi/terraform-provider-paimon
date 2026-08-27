@@ -19,6 +19,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -408,7 +409,7 @@ func (r *permissionResource) lookup(ctx context.Context, model permissionResourc
 		return client.PermissionAssignment{}, false, nil
 	}
 	if len(matches) > 1 {
-		return client.PermissionAssignment{}, false, fmt.Errorf("the REST Catalog returned more than one assignment for the same resource, access, and principal identity")
+		return client.PermissionAssignment{}, false, errors.New("the REST Catalog returned more than one assignment for the same resource, access, and principal identity")
 	}
 
 	return matches[0], true, nil
@@ -597,7 +598,7 @@ func parsePermissionID(id string) (permissionResourceModel, error) {
 		ExcludedColumnNames: types.SetUnknown(types.StringType),
 	}
 	if utf8.RuneCountInString(model.Principal.ValueString()) > 128 {
-		return permissionResourceModel{}, fmt.Errorf("principal must contain at most 128 characters")
+		return permissionResourceModel{}, errors.New("principal must contain at most 128 characters")
 	}
 	var diags diag.Diagnostics
 	validatePermissionModel(model, &diags)
