@@ -210,17 +210,6 @@ func tableFieldSchemaChanges(before, after []client.Field, addBeforePartition bo
 		}
 	}
 	for index, planned := range after {
-		if _, retained := beforeByID[planned.ID]; retained {
-			continue
-		}
-		currentIndex := slices.Index(currentOrder, planned.Name)
-		if currentIndex == index {
-			continue
-		}
-		changes = append(changes, columnPositionChange(after, index))
-		currentOrder = moveString(currentOrder, currentIndex, index)
-	}
-	for index, planned := range after {
 		currentIndex := slices.Index(currentOrder, planned.Name)
 		if currentIndex == index {
 			continue

@@ -17,6 +17,7 @@ package provider
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/apache/terraform-provider-paimon/internal/client"
@@ -250,13 +251,69 @@ func TestTableFieldSchemaChangesAccountsForAddBeforePartition(t *testing.T) {
 	assert.Equal(t, client.SchemaChange{
 		"action": "updateColumnPosition",
 		"move": client.SchemaChange{
-			"fieldName":          "payload",
+			"fieldName":          "day",
 			"type":               "AFTER",
-			"referenceFieldName": "day",
+			"referenceFieldName": "id",
 		},
 	}, changes[1])
 
 	changes, err = tableFieldSchemaChanges(before, after, false, []string{"day"})
 	require.NoError(t, err)
 	require.Len(t, changes, 1)
+}
+
+func TestTableFieldSchemaChangesUsesStableReferencePrefix(t *testing.T) {
+	before := []client.Field{
+		{ID: 0, Name: "a", Type: "STRING"},
+		{ID: 1, Name: "b", Type: "STRING"},
+		{ID: 2, Name: "c", Type: "STRING"},
+		{ID: 3, Name: "d", Type: "STRING"},
+	}
+	after := []client.Field{
+		before[0],
+		before[1],
+		before[3],
+		{ID: 4, Name: "x", Type: "STRING"},
+		before[2],
+		{ID: 5, Name: "y", Type: "STRING"},
+	}
+
+	changes, err := tableFieldSchemaChanges(before, after, true, []string{"c", "d"})
+	require.NoError(t, err)
+	order := []string{"a", "b", "x", "y", "c", "d"}
+	for _, change := range changes {
+		if change["action"] != "updateColumnPosition" {
+			continue
+		}
+		order = applyPositionChangeByReference(order, change["move"].(client.SchemaChange))
+	}
+	assert.Equal(t, []string{"a", "b", "d", "x", "c", "y"}, order)
+	assert.Equal(t, client.SchemaChange{
+		"action": "updateColumnPosition",
+		"move": client.SchemaChange{
+			"fieldName":          "d",
+			"type":               "AFTER",
+			"referenceFieldName": "b",
+		},
+	}, changes[2])
+	assert.Equal(t, client.SchemaChange{
+		"action": "updateColumnPosition",
+		"move": client.SchemaChange{
+			"fieldName":          "c",
+			"type":               "AFTER",
+			"referenceFieldName": "x",
+		},
+	}, changes[3])
+}
+
+func applyPositionChangeByReference(order []string, move client.SchemaChange) []string {
+	fieldName := move["fieldName"].(string)
+	from := slices.Index(order, fieldName)
+	order = append(order[:from], order[from+1:]...)
+	insertAt := 0
+	if move["type"] == "AFTER" {
+		insertAt = slices.Index(order, move["referenceFieldName"].(string)) + 1
+	}
+
+	return insertString(order, insertAt, fieldName)
 }
