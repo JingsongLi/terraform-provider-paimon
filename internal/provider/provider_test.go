@@ -107,12 +107,13 @@ func TestSchemaFromResourceModelNormalizesPrimaryKeyNullability(t *testing.T) {
 	ctx := context.Background()
 	fields, diagnostics := types.ListValueFrom(ctx, types.ObjectType{AttrTypes: tableFieldAttrTypes()}, []tableFieldModel{
 		{
-			ID:           types.Int64Unknown(),
-			Name:         types.StringValue("id"),
-			Type:         types.StringValue("BIGINT"),
-			Nullable:     types.BoolUnknown(),
-			Description:  types.StringNull(),
-			DefaultValue: types.StringNull(),
+			ID:             types.Int64Unknown(),
+			Name:           types.StringValue("id"),
+			Type:           types.StringValue("BIGINT"),
+			Nullable:       types.BoolUnknown(),
+			Description:    types.StringNull(),
+			DefaultValue:   types.StringNull(),
+			NestedFieldIDs: types.MapUnknown(types.Int64Type),
 		},
 	})
 	require.False(t, diagnostics.HasError(), diagnostics.Errors())
@@ -222,6 +223,10 @@ func TestImmutableTableOptionsChanged(t *testing.T) {
 		mapValue(map[string]attr.Value{"primary-key.nullable": types.StringValue("true")}),
 		mapValue(map[string]attr.Value{}),
 	))
+	assert.True(t, immutableTableOptionsChanged(
+		mapValue(map[string]attr.Value{"video-frame-field": types.StringValue("frames")}),
+		mapValue(map[string]attr.Value{"video-frame-field": types.StringValue("new_frames")}),
+	))
 	assert.False(t, immutableTableOptionsChanged(
 		types.MapNull(types.StringType),
 		mapValue(map[string]attr.Value{"type": types.StringValue("table")}),
@@ -328,6 +333,11 @@ func TestTableResourceLifecycle(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		case request.Method == http.MethodGet && request.URL.Path == "/v1/catalog/databases/analytics/tables/events":
 			readCalls++
+			if readCalls == 1 {
+				http.NotFound(w, request)
+
+				return
+			}
 			require.NoError(t, json.NewEncoder(w).Encode(remote))
 		case request.Method == http.MethodPost && request.URL.Path == "/v1/catalog/databases/analytics/tables/events":
 			updateCalls++
@@ -357,28 +367,31 @@ func TestTableResourceLifecycle(t *testing.T) {
 
 	fields, diagnostics := types.ListValueFrom(ctx, types.ObjectType{AttrTypes: tableFieldAttrTypes()}, []tableFieldModel{
 		{
-			ID:           types.Int64Unknown(),
-			Name:         types.StringValue("id"),
-			Type:         types.StringValue("BIGINT"),
-			Nullable:     types.BoolValue(false),
-			Description:  types.StringNull(),
-			DefaultValue: types.StringNull(),
+			ID:             types.Int64Unknown(),
+			Name:           types.StringValue("id"),
+			Type:           types.StringValue("BIGINT"),
+			Nullable:       types.BoolValue(false),
+			Description:    types.StringNull(),
+			DefaultValue:   types.StringNull(),
+			NestedFieldIDs: types.MapUnknown(types.Int64Type),
 		},
 		{
-			ID:           types.Int64Unknown(),
-			Name:         types.StringValue("labels"),
-			Type:         types.StringValue("MAP<INTEGER,STRING>"),
-			Nullable:     types.BoolValue(true),
-			Description:  types.StringNull(),
-			DefaultValue: types.StringNull(),
+			ID:             types.Int64Unknown(),
+			Name:           types.StringValue("labels"),
+			Type:           types.StringValue("MAP<INTEGER,STRING>"),
+			Nullable:       types.BoolValue(true),
+			Description:    types.StringNull(),
+			DefaultValue:   types.StringNull(),
+			NestedFieldIDs: types.MapUnknown(types.Int64Type),
 		},
 		{
-			ID:           types.Int64Unknown(),
-			Name:         types.StringValue("payload"),
-			Type:         types.StringValue("ROW<`item` STRING>"),
-			Nullable:     types.BoolValue(true),
-			Description:  types.StringNull(),
-			DefaultValue: types.StringNull(),
+			ID:             types.Int64Unknown(),
+			Name:           types.StringValue("payload"),
+			Type:           types.StringValue("ROW<`item` STRING>"),
+			Nullable:       types.BoolValue(true),
+			Description:    types.StringNull(),
+			DefaultValue:   types.StringNull(),
+			NestedFieldIDs: types.MapUnknown(types.Int64Type),
 		},
 	})
 	require.False(t, diagnostics.HasError(), diagnostics.Errors())
@@ -441,18 +454,74 @@ func TestTableResourceLifecycle(t *testing.T) {
 	table.Delete(ctx, resource.DeleteRequest{State: updateResponse.State}, &deleteResponse)
 	require.False(t, deleteResponse.Diagnostics.HasError(), deleteResponse.Diagnostics.Errors())
 	assert.Equal(t, 1, createCalls)
-	assert.Equal(t, 3, readCalls)
+	assert.Equal(t, 4, readCalls)
 	assert.Equal(t, 1, updateCalls)
 	assert.Equal(t, 1, deleteCalls)
 }
 
+func TestDatabaseCreateRetainsIdentityWhenReadBackFails(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/v1/config":
+			writeProviderJSON(t, w, client.ConfigResponse{Defaults: map[string]string{"prefix": "catalog"}})
+		case request.Method == http.MethodPost && request.URL.Path == "/v1/catalog/databases":
+			w.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodGet && request.URL.Path == "/v1/catalog/databases/analytics":
+			http.NotFound(w, request)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+
+	api, err := client.New(client.Config{URI: server.URL})
+	require.NoError(t, err)
+	database := &databaseResource{client: api}
+	var schemaResponse resource.SchemaResponse
+	database.Schema(ctx, resource.SchemaRequest{}, &schemaResponse)
+	require.False(t, schemaResponse.Diagnostics.HasError(), schemaResponse.Diagnostics.Errors())
+
+	planModel := databaseResourceModel{
+		ID:            types.StringUnknown(),
+		CatalogID:     types.StringUnknown(),
+		Name:          types.StringValue("analytics"),
+		Options:       types.MapNull(types.StringType),
+		ServerOptions: types.MapUnknown(types.StringType),
+		Location:      types.StringUnknown(),
+		Owner:         types.StringUnknown(),
+		CreatedAt:     types.Int64Unknown(),
+		CreatedBy:     types.StringUnknown(),
+		UpdatedAt:     types.Int64Unknown(),
+		UpdatedBy:     types.StringUnknown(),
+	}
+	plan := tfsdk.Plan{Schema: schemaResponse.Schema}
+	require.False(t, plan.Set(ctx, &planModel).HasError())
+	createResponse := resource.CreateResponse{State: tfsdk.State{Schema: schemaResponse.Schema}}
+	database.Create(ctx, resource.CreateRequest{Plan: plan}, &createResponse)
+	require.True(t, createResponse.Diagnostics.HasError())
+	assert.Contains(t, createResponse.Diagnostics.Errors()[0].Summary(), "verify Paimon database")
+
+	var state databaseResourceModel
+	require.False(t, createResponse.State.Get(ctx, &state).HasError())
+	assert.Equal(t, "analytics", state.ID.ValueString())
+	assert.Equal(t, "analytics", state.Name.ValueString())
+}
+
+func writeProviderJSON(t *testing.T, w http.ResponseWriter, value any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	require.NoError(t, json.NewEncoder(w).Encode(value))
+}
+
 func tableFieldForTest(name string, id types.Int64) tableFieldModel {
 	return tableFieldModel{
-		ID:           id,
-		Name:         types.StringValue(name),
-		Type:         types.StringValue("STRING"),
-		Nullable:     types.BoolValue(true),
-		Description:  types.StringNull(),
-		DefaultValue: types.StringNull(),
+		ID:             id,
+		Name:           types.StringValue(name),
+		Type:           types.StringValue("STRING"),
+		Nullable:       types.BoolValue(true),
+		Description:    types.StringNull(),
+		DefaultValue:   types.StringNull(),
+		NestedFieldIDs: types.MapUnknown(types.Int64Type),
 	}
 }

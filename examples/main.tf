@@ -49,7 +49,7 @@ resource "paimon_table" "events" {
     {
       name = "event_time"
       type = "TIMESTAMP(3)"
-    }
+    },
     {
       name = "payload"
       type = "STRING"

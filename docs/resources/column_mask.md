@@ -1,3 +1,10 @@
+---
+page_title: "paimon_column_mask Resource - Paimon"
+subcategory: ""
+description: |-
+  Manages a column masking policy for an Apache Paimon table.
+---
+
 <!--
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements. See the NOTICE file

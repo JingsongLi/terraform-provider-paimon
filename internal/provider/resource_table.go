@@ -19,7 +19,10 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -34,6 +37,7 @@ import (
 var (
 	_ resource.Resource                = &tableResource{}
 	_ resource.ResourceWithImportState = &tableResource{}
+	_ resource.ResourceWithModifyPlan  = &tableResource{}
 )
 
 type tableResource struct {
@@ -80,6 +84,78 @@ func (r *tableResource) Configure(_ context.Context, req resource.ConfigureReque
 	clientFromProviderData(req.ProviderData, &r.client, &resp.Diagnostics, "paimon_table resource")
 }
 
+func (r *tableResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+		return
+	}
+
+	var config, state, plan tableResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	var configuredFields, stateFields, plannedFields []tableFieldModel
+	resp.Diagnostics.Append(config.Fields.ElementsAs(ctx, &configuredFields, false)...)
+	resp.Diagnostics.Append(state.Fields.ElementsAs(ctx, &stateFields, false)...)
+	resp.Diagnostics.Append(plan.Fields.ElementsAs(ctx, &plannedFields, false)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if len(configuredFields) != len(plannedFields) {
+		resp.Diagnostics.AddError("Unable to stabilize Paimon field identities", "The configured and planned field lists have different lengths. Please report this issue to the provider developers.")
+
+		return
+	}
+
+	stabilizePlannedFieldIdentities(configuredFields, stateFields, plannedFields)
+	keyFields := append(stringListFromValue(ctx, state.PartitionKeys, &resp.Diagnostics), stringListFromValue(ctx, state.PrimaryKeys, &resp.Diagnostics)...)
+	keyFields = append(keyFields, stringListFromValue(ctx, plan.PartitionKeys, &resp.Diagnostics)...)
+	keyFields = append(keyFields, stringListFromValue(ctx, plan.PrimaryKeys, &resp.Diagnostics)...)
+	plan.Fields = fieldsValueFromModels(ctx, plannedFields, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	resp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)
+	if compositeFieldTypesRequireReplace(stateFields, plannedFields) ||
+		keyFieldTypesRequireReplace(stateFields, plannedFields, keyFields) ||
+		newNonNullableFieldsRequireReplace(stateFields, plannedFields) {
+		resp.RequiresReplace = append(resp.RequiresReplace, path.Root("fields"))
+	}
+}
+
+func stabilizePlannedFieldIdentities(configured, state, planned []tableFieldModel) {
+	stateByName := make(map[string]tableFieldModel, len(state))
+	stateByID := make(map[int64]tableFieldModel, len(state))
+	for _, field := range state {
+		if !field.Name.IsNull() && !field.Name.IsUnknown() {
+			stateByName[field.Name.ValueString()] = field
+		}
+		if !field.ID.IsNull() && !field.ID.IsUnknown() {
+			stateByID[field.ID.ValueInt64()] = field
+		}
+	}
+
+	for index := range planned {
+		var previous tableFieldModel
+		var matched bool
+		if !configured[index].ID.IsNull() && !configured[index].ID.IsUnknown() {
+			previous, matched = stateByID[configured[index].ID.ValueInt64()]
+			planned[index].ID = configured[index].ID
+		} else if !configured[index].Name.IsNull() && !configured[index].Name.IsUnknown() {
+			previous, matched = stateByName[configured[index].Name.ValueString()]
+			if matched {
+				planned[index].ID = previous.ID
+			}
+		}
+		if matched {
+			planned[index].NestedFieldIDs = previous.NestedFieldIDs
+		}
+	}
+}
+
 func (r *tableResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan tableResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -91,14 +167,42 @@ func (r *tableResource) Create(ctx context.Context, req resource.CreateRequest, 
 		return
 	}
 	if err := r.client.CreateTable(ctx, plan.Database.ValueString(), plan.Name.ValueString(), tableSchema); err != nil {
-		resp.Diagnostics.AddError("Unable to create Paimon table", err.Error())
+		if !client.IsMutationOutcomeUncertain(err) {
+			resp.Diagnostics.AddError("Unable to create Paimon table", err.Error())
+
+			return
+		}
+		table, recoveryErr := r.lookupAfterMutation(ctx, plan.Database.ValueString(), plan.Name.ValueString(), func(observed *client.Table) bool {
+			return tableMatchesPlannedSchema(observed, tableSchema, true, true)
+		})
+		if recoveryErr != nil {
+			resp.Diagnostics.AddError("Unable to create Paimon table", fmt.Sprintf("create request failed (%s), and bounded reconciliation could not establish the remote state: %s", err, recoveryErr))
+
+			return
+		}
+		stableCtx := context.WithoutCancel(ctx)
+		setTableResourceModel(stableCtx, &plan, table, &resp.Diagnostics)
+		resp.Diagnostics.Append(resp.State.Set(stableCtx, &plan)...)
+		resp.Diagnostics.AddWarning("Recovered Paimon table creation", "The create request returned an error, but bounded reconciliation found the exact table schema that Terraform planned, so the resource was adopted into state.")
 
 		return
 	}
-	r.readIntoState(ctx, &plan, &resp.Diagnostics)
-	if !resp.Diagnostics.HasError() {
-		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	stableCtx := context.WithoutCancel(ctx)
+	plan.ID = types.StringValue(tableID(plan.Database.ValueString(), plan.Name.ValueString()))
+	resp.Diagnostics.Append(resp.State.Set(stableCtx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
+	table, err := r.lookupAfterMutation(ctx, plan.Database.ValueString(), plan.Name.ValueString(), func(observed *client.Table) bool {
+		return tableMatchesPlannedSchema(observed, tableSchema, true, false)
+	})
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to verify Paimon table after creation", err.Error()+". Terraform retained the planned table identity in state.")
+
+		return
+	}
+	setTableResourceModel(stableCtx, &plan, table, &resp.Diagnostics)
+	resp.Diagnostics.Append(resp.State.Set(stableCtx, &plan)...)
 }
 
 func (r *tableResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -132,8 +236,18 @@ func (r *tableResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		return
 	}
 
-	before := mapFromValue(ctx, state.Options, &resp.Diagnostics)
-	after := mapFromValue(ctx, plan.Options, &resp.Diagnostics)
+	beforeSchema := schemaFromResourceModel(ctx, &state, &resp.Diagnostics)
+	afterSchema := schemaFromResourceModel(ctx, &plan, &resp.Diagnostics)
+	var plannedFields []tableFieldModel
+	resp.Diagnostics.Append(plan.Fields.ElementsAs(ctx, &plannedFields, false)...)
+	if !resp.Diagnostics.HasError() {
+		if err := assignTemporaryIDsToNewFields(beforeSchema.Fields, plannedFields, afterSchema.Fields); err != nil {
+			resp.Diagnostics.AddError("Unable to plan Paimon table field identities", err.Error())
+		}
+	}
+	before := beforeSchema.Options
+	after := afterSchema.Options
+	serverOptions := mapFromValue(ctx, state.ServerOptions, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -145,7 +259,17 @@ func (r *tableResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	}
 	sort.Strings(updateKeys)
 
-	changes := make([]client.SchemaChange, 0, len(removals)+len(updates)+1)
+	addBeforePartitionValue, serverReportedOption := serverOptions["add-column-before-partition"]
+	if !serverReportedOption {
+		addBeforePartitionValue = before["add-column-before-partition"]
+	}
+	addBeforePartition := strings.EqualFold(strings.TrimSpace(addBeforePartitionValue), "true")
+	changes, err := tableFieldSchemaChanges(beforeSchema.Fields, afterSchema.Fields, addBeforePartition, beforeSchema.PartitionKeys)
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to plan Paimon table schema changes", err.Error())
+
+		return
+	}
 	for _, key := range removals {
 		changes = append(changes, client.SchemaChange{"action": "removeOption", "key": key})
 	}
@@ -158,15 +282,40 @@ func (r *tableResource) Update(ctx context.Context, req resource.UpdateRequest, 
 
 	if len(changes) > 0 {
 		if err := r.client.AlterTable(ctx, plan.Database.ValueString(), plan.Name.ValueString(), changes); err != nil {
+			if client.IsMutationOutcomeUncertain(err) {
+				table, recoveryErr := r.lookupAfterMutation(ctx, plan.Database.ValueString(), plan.Name.ValueString(), func(observed *client.Table) bool {
+					return tableMatchesPlannedSchema(observed, afterSchema, false, false)
+				})
+				if recoveryErr == nil {
+					stableCtx := context.WithoutCancel(ctx)
+					setTableResourceModel(stableCtx, &plan, table, &resp.Diagnostics)
+					resp.Diagnostics.Append(resp.State.Set(stableCtx, &plan)...)
+					resp.Diagnostics.AddWarning("Recovered Paimon table update", "The alter request returned an error, but bounded reconciliation found the exact table schema that Terraform planned.")
+
+					return
+				}
+			}
 			resp.Diagnostics.AddError("Unable to update Paimon table", err.Error())
 
 			return
 		}
 	}
-	r.readIntoState(ctx, &plan, &resp.Diagnostics)
-	if !resp.Diagnostics.HasError() {
-		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	stableCtx := context.WithoutCancel(ctx)
+	plan.ID = types.StringValue(tableID(plan.Database.ValueString(), plan.Name.ValueString()))
+	resp.Diagnostics.Append(resp.State.Set(stableCtx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
+	table, err := r.lookupAfterMutation(ctx, plan.Database.ValueString(), plan.Name.ValueString(), func(observed *client.Table) bool {
+		return tableMatchesPlannedSchema(observed, afterSchema, false, false)
+	})
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to verify Paimon table after update", err.Error()+". Terraform retained the planned table state.")
+
+		return
+	}
+	setTableResourceModel(stableCtx, &plan, table, &resp.Diagnostics)
+	resp.Diagnostics.Append(resp.State.Set(stableCtx, &plan)...)
 }
 
 func (r *tableResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -181,26 +330,68 @@ func (r *tableResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 }
 
 func (r *tableResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	separator := strings.LastIndex(req.ID, ".")
-	if separator <= 0 || separator == len(req.ID)-1 {
-		resp.Diagnostics.AddError("Invalid Paimon table import identifier", "Expected an identifier in database.table form, got: "+req.ID)
+	database, name, err := parseTableID(req.ID)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid Paimon table import identifier", err.Error())
 
 		return
 	}
-	database, name := req.ID[:separator], req.ID[separator+1:]
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), tableID(database, name))...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("database"), database)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), name)...)
 }
 
-func (r *tableResource) readIntoState(ctx context.Context, model *tableResourceModel, diags *diag.Diagnostics) {
-	table, err := r.client.GetTable(ctx, model.Database.ValueString(), model.Name.ValueString())
-	if err != nil {
-		diags.AddError("Unable to read Paimon table after change", err.Error())
+func (r *tableResource) lookupAfterMutation(ctx context.Context, database, name string, ready func(*client.Table) bool) (*client.Table, error) {
+	recoveryCtx, cancel := mutationRecoveryContext(ctx)
+	defer cancel()
+	table, found, converged, err := retryLookupUntil(recoveryCtx, func(attemptCtx context.Context) (*client.Table, bool, error) {
+		observed, lookupErr := r.client.GetTable(attemptCtx, database, name)
+		if client.IsNotFound(lookupErr) {
+			return nil, false, nil
+		}
 
-		return
+		return observed, lookupErr == nil, lookupErr
+	}, ready)
+	if err != nil {
+		return nil, err
 	}
-	setTableResourceModel(ctx, model, table, diags)
+	if !found {
+		return nil, fmt.Errorf("table %q.%q was not visible during bounded reconciliation", database, name)
+	}
+	if !converged {
+		return nil, fmt.Errorf("table %q.%q did not converge to the planned schema during bounded reconciliation", database, name)
+	}
+
+	return table, nil
+}
+
+func tableMatchesPlannedSchema(table *client.Table, expected client.Schema, compareFieldIDs, exactOptions bool) bool {
+	if table == nil || len(table.Schema.Fields) != len(expected.Fields) || len(table.Schema.PartitionKeys) != len(expected.PartitionKeys) || len(table.Schema.PrimaryKeys) != len(expected.PrimaryKeys) || exactOptions && len(table.Schema.Options) != len(expected.Options) {
+		return false
+	}
+	for index, planned := range expected.Fields {
+		observed := table.Schema.Fields[index]
+		if compareFieldIDs && (observed.ID != planned.ID || len(planned.NestedFieldIDs) > 0 && !maps.Equal(observed.NestedFieldIDs, planned.NestedFieldIDs)) || observed.Name != planned.Name || !client.EquivalentDataTypes(observed.Type, planned.Type) || !stringPointersEqual(observed.Description, planned.Description) || !stringPointersEqual(observed.DefaultValue, planned.DefaultValue) {
+			return false
+		}
+	}
+	for index := range expected.PartitionKeys {
+		if table.Schema.PartitionKeys[index] != expected.PartitionKeys[index] {
+			return false
+		}
+	}
+	for index := range expected.PrimaryKeys {
+		if table.Schema.PrimaryKeys[index] != expected.PrimaryKeys[index] {
+			return false
+		}
+	}
+	for key, value := range expected.Options {
+		if table.Schema.Options[key] != value {
+			return false
+		}
+	}
+
+	return stringPointersEqual(table.Schema.Comment, expected.Comment)
 }
 
 func setTableResourceModel(ctx context.Context, model *tableResourceModel, table *client.Table, diags *diag.Diagnostics) {
@@ -212,7 +403,7 @@ func setTableResourceModel(ctx context.Context, model *tableResourceModel, table
 	if name == "" {
 		name = model.Name.ValueString()
 	}
-	model.ID = types.StringValue(fmt.Sprintf("%s.%s", database, name))
+	model.ID = types.StringValue(tableID(database, name))
 	model.CatalogID = types.StringValue(table.ID)
 	model.Database = types.StringValue(database)
 	model.Name = types.StringValue(name)
@@ -230,4 +421,32 @@ func setTableResourceModel(ctx context.Context, model *tableResourceModel, table
 	model.CreatedBy = types.StringValue(table.CreatedBy)
 	model.UpdatedAt = types.Int64Value(table.UpdatedAt)
 	model.UpdatedBy = types.StringValue(table.UpdatedBy)
+}
+
+func tableID(database, name string) string {
+	values := make(url.Values, 2)
+	values.Set("database", database)
+	values.Set("table", name)
+
+	return values.Encode()
+}
+
+func parseTableID(value string) (string, string, error) {
+	if strings.Contains(value, "=") {
+		values, err := url.ParseQuery(value)
+		if err != nil {
+			return "", "", errors.New("table import identifier must be a valid URL query")
+		}
+		if len(values) != 2 || len(values["database"]) != 1 || len(values["table"]) != 1 || values.Get("database") == "" || values.Get("table") == "" {
+			return "", "", errors.New("table import identifier must contain exactly one non-empty database and table query parameter")
+		}
+
+		return values.Get("database"), values.Get("table"), nil
+	}
+	separator := strings.LastIndex(value, ".")
+	if separator <= 0 || separator == len(value)-1 {
+		return "", "", fmt.Errorf("expected database=<name>&table=<name> or the legacy database.table form, got: %s", value)
+	}
+
+	return value[:separator], value[separator+1:], nil
 }

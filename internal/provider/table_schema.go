@@ -37,12 +37,13 @@ import (
 )
 
 type tableFieldModel struct {
-	ID           types.Int64  `tfsdk:"id"`
-	Name         types.String `tfsdk:"name"`
-	Type         types.String `tfsdk:"type"`
-	Nullable     types.Bool   `tfsdk:"nullable"`
-	Description  types.String `tfsdk:"description"`
-	DefaultValue types.String `tfsdk:"default_value"`
+	ID             types.Int64  `tfsdk:"id"`
+	Name           types.String `tfsdk:"name"`
+	Type           types.String `tfsdk:"type"`
+	Nullable       types.Bool   `tfsdk:"nullable"`
+	Description    types.String `tfsdk:"description"`
+	DefaultValue   types.String `tfsdk:"default_value"`
+	NestedFieldIDs types.Map    `tfsdk:"nested_field_ids"`
 }
 
 // Paimon reserves IDs at and above SpecialFields.SYSTEM_FIELD_ID_START.
@@ -50,22 +51,28 @@ const maxPaimonFieldID = (1 << 30) - 2
 
 func tableFieldAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
-		"id":            types.Int64Type,
-		"name":          types.StringType,
-		"type":          types.StringType,
-		"nullable":      types.BoolType,
-		"description":   types.StringType,
-		"default_value": types.StringType,
+		"id":               types.Int64Type,
+		"name":             types.StringType,
+		"type":             types.StringType,
+		"nullable":         types.BoolType,
+		"description":      types.StringType,
+		"default_value":    types.StringType,
+		"nested_field_ids": types.MapType{ElemType: types.Int64Type},
 	}
 }
 
 func tableResourceAttributes() map[string]rschema.Attribute {
 	return map[string]rschema.Attribute{
 		"id": rschema.StringAttribute{
-			Description: "Terraform identifier in database.table form.",
-			Computed:    true,
+			Description:   "Stable URL-query identifier for the table identity.",
+			Computed:      true,
+			PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 		},
-		"catalog_id": rschema.StringAttribute{Description: "Server-assigned table identifier.", Computed: true},
+		"catalog_id": rschema.StringAttribute{
+			Description:   "Server-assigned table identifier.",
+			Computed:      true,
+			PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+		},
 		"database": rschema.StringAttribute{
 			Description:   "Database containing the table.",
 			Required:      true,
@@ -77,24 +84,23 @@ func tableResourceAttributes() map[string]rschema.Attribute {
 			PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 		},
 		"fields": rschema.ListNestedAttribute{
-			Description:   "Ordered table fields. Field, primary-key and partition-key changes replace the table in this initial provider version.",
-			Required:      true,
-			PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplace()},
-			NestedObject:  rschema.NestedAttributeObject{Attributes: tableFieldResourceAttributes()},
+			Description:  "Ordered table fields. Supported Paimon schema changes are applied in place using stable field IDs.",
+			Required:     true,
+			NestedObject: rschema.NestedAttributeObject{Attributes: tableFieldResourceAttributes()},
 		},
 		"partition_keys": rschema.ListAttribute{
 			Description:   "Ordered partition key field names.",
 			Optional:      true,
 			Computed:      true,
 			ElementType:   types.StringType,
-			PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplace()},
+			PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplaceIfConfigured()},
 		},
 		"primary_keys": rschema.ListAttribute{
 			Description:   "Ordered primary key field names.",
 			Optional:      true,
 			Computed:      true,
 			ElementType:   types.StringType,
-			PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplace()},
+			PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplaceIfConfigured()},
 		},
 		"options": rschema.MapAttribute{
 			Description:   "Table options managed by Terraform. Options not declared here are preserved. Paimon options that are immutable after creation cause replacement when changed.",
@@ -120,6 +126,89 @@ func tableResourceAttributes() map[string]rschema.Attribute {
 	}
 }
 
+func compositeFieldTypesRequireReplace(before, after []tableFieldModel) bool {
+	beforeByID := make(map[int64]tableFieldModel, len(before))
+	for _, field := range before {
+		if !field.ID.IsNull() && !field.ID.IsUnknown() {
+			beforeByID[field.ID.ValueInt64()] = field
+		}
+	}
+	for _, planned := range after {
+		if planned.ID.IsNull() || planned.ID.IsUnknown() || planned.Type.IsNull() || planned.Type.IsUnknown() {
+			continue
+		}
+		previous, exists := beforeByID[planned.ID.ValueInt64()]
+		if !exists || previous.Type.IsNull() || previous.Type.IsUnknown() {
+			continue
+		}
+		previousType := client.DataType(previous.Type.ValueString())
+		plannedType := client.DataType(planned.Type.ValueString())
+		if !client.EquivalentDataTypes(previousType, plannedType) && (client.IsCompositeDataType(previousType) || client.IsCompositeDataType(plannedType)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func keyFieldTypesRequireReplace(before, after []tableFieldModel, keyFields []string) bool {
+	keys := make(map[string]struct{}, len(keyFields))
+	for _, name := range keyFields {
+		keys[name] = struct{}{}
+	}
+	beforeByID := make(map[int64]tableFieldModel, len(before))
+	for _, field := range before {
+		if !field.ID.IsNull() && !field.ID.IsUnknown() {
+			beforeByID[field.ID.ValueInt64()] = field
+		}
+	}
+	for _, planned := range after {
+		if planned.ID.IsNull() || planned.ID.IsUnknown() || planned.Type.IsNull() || planned.Type.IsUnknown() {
+			continue
+		}
+		previous, exists := beforeByID[planned.ID.ValueInt64()]
+		if !exists || previous.Type.IsNull() || previous.Type.IsUnknown() {
+			continue
+		}
+		_, previousIsKey := keys[previous.Name.ValueString()]
+		_, plannedIsKey := keys[planned.Name.ValueString()]
+		if (previousIsKey || plannedIsKey) && !client.EquivalentDataTypes(client.DataType(previous.Type.ValueString()), client.DataType(planned.Type.ValueString())) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func newNonNullableFieldsRequireReplace(before, after []tableFieldModel) bool {
+	beforeByID := make(map[int64]struct{}, len(before))
+	for _, field := range before {
+		if !field.ID.IsNull() && !field.ID.IsUnknown() {
+			beforeByID[field.ID.ValueInt64()] = struct{}{}
+		}
+	}
+	for _, field := range after {
+		retained := false
+		if !field.ID.IsNull() && !field.ID.IsUnknown() {
+			_, retained = beforeByID[field.ID.ValueInt64()]
+		}
+		if retained {
+			continue
+		}
+		if !field.Nullable.IsNull() && !field.Nullable.IsUnknown() && !field.Nullable.ValueBool() {
+			return true
+		}
+		if !field.Type.IsNull() && !field.Type.IsUnknown() {
+			_, nullable := splitFieldType(client.DataType(field.Type.ValueString()))
+			if !nullable {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func tableFieldResourceAttributes() map[string]rschema.Attribute {
 	return map[string]rschema.Attribute{
 		"id": rschema.Int64Attribute{
@@ -140,12 +229,17 @@ func tableFieldResourceAttributes() map[string]rschema.Attribute {
 		},
 		"description":   rschema.StringAttribute{Description: "Field description.", Optional: true},
 		"default_value": rschema.StringAttribute{Description: "Field default expression.", Optional: true},
+		"nested_field_ids": rschema.MapAttribute{
+			Description: "Stable nested ROW field IDs keyed by escaped field path. Populated by the REST Catalog.",
+			Computed:    true,
+			ElementType: types.Int64Type,
+		},
 	}
 }
 
 func tableDataSourceAttributes() map[string]dschema.Attribute {
 	return map[string]dschema.Attribute{
-		"id":         dschema.StringAttribute{Description: "Terraform identifier in database.table form.", Computed: true},
+		"id":         dschema.StringAttribute{Description: "Stable URL-query identifier for the table identity.", Computed: true},
 		"catalog_id": dschema.StringAttribute{Description: "Server-assigned table identifier.", Computed: true},
 		"database":   dschema.StringAttribute{Description: "Database containing the table.", Required: true},
 		"name":       dschema.StringAttribute{Description: "Table name.", Required: true},
@@ -177,6 +271,11 @@ func tableFieldDataSourceAttributes() map[string]dschema.Attribute {
 		"nullable":      dschema.BoolAttribute{Description: "Whether the field accepts null values.", Computed: true},
 		"description":   dschema.StringAttribute{Description: "Field description.", Computed: true},
 		"default_value": dschema.StringAttribute{Description: "Field default expression.", Computed: true},
+		"nested_field_ids": dschema.MapAttribute{
+			Description: "Stable nested ROW field IDs keyed by escaped field path.",
+			Computed:    true,
+			ElementType: types.Int64Type,
+		},
 	}
 }
 
@@ -241,11 +340,12 @@ func schemaFromResourceModel(ctx context.Context, model *tableResourceModel, dia
 			typeName += " NOT NULL"
 		}
 		fields = append(fields, client.Field{
-			ID:           fieldIDs[index],
-			Name:         field.Name.ValueString(),
-			Type:         client.DataType(typeName),
-			Description:  optionalStringPointer(field.Description),
-			DefaultValue: optionalStringPointer(field.DefaultValue),
+			ID:             fieldIDs[index],
+			Name:           field.Name.ValueString(),
+			Type:           client.DataType(typeName),
+			Description:    optionalStringPointer(field.Description),
+			DefaultValue:   optionalStringPointer(field.DefaultValue),
+			NestedFieldIDs: nestedFieldIDsFromValue(ctx, field.NestedFieldIDs, diags),
 		})
 		if _, duplicate := fieldNames[field.Name.ValueString()]; duplicate {
 			diags.AddError("Duplicate Paimon field", "Field names must be unique: "+field.Name.ValueString())
@@ -361,16 +461,45 @@ func fieldModelsFromRemote(fields []client.Field) []tableFieldModel {
 			typeName = strings.TrimSpace(typeName[:len(typeName)-len(" NOT NULL")])
 		}
 		models = append(models, tableFieldModel{
-			ID:           types.Int64Value(int64(field.ID)),
-			Name:         types.StringValue(field.Name),
-			Type:         types.StringValue(typeName),
-			Nullable:     types.BoolValue(nullable),
-			Description:  stringValueFromPointer(field.Description),
-			DefaultValue: stringValueFromPointer(field.DefaultValue),
+			ID:             types.Int64Value(int64(field.ID)),
+			Name:           types.StringValue(field.Name),
+			Type:           types.StringValue(typeName),
+			Nullable:       types.BoolValue(nullable),
+			Description:    stringValueFromPointer(field.Description),
+			DefaultValue:   stringValueFromPointer(field.DefaultValue),
+			NestedFieldIDs: nestedFieldIDsValue(field.NestedFieldIDs),
 		})
 	}
 
 	return models
+}
+
+func nestedFieldIDsFromValue(ctx context.Context, value types.Map, diags *diag.Diagnostics) map[string]int {
+	result := make(map[string]int)
+	if value.IsNull() || value.IsUnknown() {
+		return result
+	}
+	var values map[string]int64
+	diags.Append(value.ElementsAs(ctx, &values, false)...)
+	for path, fieldID := range values {
+		if fieldID < 0 || fieldID > maxPaimonFieldID {
+			diags.AddError("Invalid nested Paimon field ID", "Nested field "+path+" must have an ID between 0 and "+strconv.Itoa(maxPaimonFieldID)+".")
+
+			continue
+		}
+		result[path] = int(fieldID)
+	}
+
+	return result
+}
+
+func nestedFieldIDsValue(values map[string]int) types.Map {
+	converted := make(map[string]attr.Value, len(values))
+	for path, fieldID := range values {
+		converted[path] = types.Int64Value(int64(fieldID))
+	}
+
+	return types.MapValueMust(types.Int64Type, converted)
 }
 
 func fieldsValueFromModels(ctx context.Context, models []tableFieldModel, diags *diag.Diagnostics) types.List {

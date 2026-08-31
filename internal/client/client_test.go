@@ -96,6 +96,55 @@ func TestClientReturnsTypedAPIError(t *testing.T) {
 	var apiErr *APIError
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, "missing", apiErr.Message)
+	assert.NotContains(t, err.Error(), "missing")
+}
+
+func TestClientDoesNotExposeRemoteErrorMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/config" {
+			writeJSON(t, w, ConfigResponse{Defaults: map[string]string{"prefix": "catalog"}})
+
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(t, w, map[string]any{"message": "reflected Bearer secret-token", "code": 50001})
+	}))
+	defer server.Close()
+
+	api, err := New(Config{URI: server.URL, Token: "secret-token"})
+	require.NoError(t, err)
+	_, err = api.GetDatabase(context.Background(), "analytics")
+	require.Error(t, err)
+	assert.EqualError(t, err, "Paimon REST API returned HTTP 500 with code 50001")
+	assert.NotContains(t, err.Error(), "secret-token")
+}
+
+func TestClientRetriesRetryableReads(t *testing.T) {
+	var configCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/config":
+			if configCalls.Add(1) == 1 {
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(http.StatusServiceUnavailable)
+
+				return
+			}
+			writeJSON(t, w, ConfigResponse{Defaults: map[string]string{"prefix": "catalog"}})
+		case "/v1/catalog/databases/analytics":
+			writeJSON(t, w, Database{ID: "db-1", Name: "analytics"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	api, err := New(Config{URI: server.URL})
+	require.NoError(t, err)
+	database, err := api.GetDatabase(context.Background(), "analytics")
+	require.NoError(t, err)
+	assert.Equal(t, "db-1", database.ID)
+	assert.Equal(t, int32(2), configCalls.Load())
 }
 
 func TestClientTableLifecycleRequests(t *testing.T) {
@@ -305,6 +354,66 @@ func TestSchemaMarshalAssignsUniqueNestedFieldIDs(t *testing.T) {
 		"primaryKeys":[],
 		"options":{}
 	}`, string(encoded))
+}
+
+func TestSchemaRoundTripPreservesNestedFieldIDs(t *testing.T) {
+	input := []byte(`{
+		"fields":[{"id":7,"name":"payload","type":{"type":"ROW","fields":[
+			{"id":42,"name":"item/name","type":"STRING"},
+			{"id":43,"name":"nested","type":{"type":"ROW","fields":[{"id":44,"name":"value","type":"BIGINT"}]}}
+		]}}],
+		"partitionKeys":[],"primaryKeys":[],"options":{}
+	}`)
+	var schema Schema
+	require.NoError(t, json.Unmarshal(input, &schema))
+	require.Len(t, schema.Fields, 1)
+	assert.Equal(t, map[string]int{
+		"/fields/item~1name":          42,
+		"/fields/nested":              43,
+		"/fields/nested/fields/value": 44,
+	}, schema.Fields[0].NestedFieldIDs)
+
+	encoded, err := json.Marshal(schema)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(input), string(encoded))
+}
+
+func TestSchemaChangeDataTypePreservesNestedFieldIDs(t *testing.T) {
+	encoded, err := json.Marshal(SchemaChangeDataType{
+		Type: DataType("ROW<item STRING, nested ROW<value BIGINT>>"),
+		NestedFieldIDs: map[string]int{
+			"/fields/item":                42,
+			"/fields/nested":              43,
+			"/fields/nested/fields/value": 44,
+		},
+		UsedFieldIDs: []int{0, 7, 41},
+	})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"type":"ROW","fields":[
+			{"id":42,"name":"item","type":"STRING"},
+			{"id":43,"name":"nested","type":{"type":"ROW","fields":[{"id":44,"name":"value","type":"BIGINT"}]}}
+		]
+	}`, string(encoded))
+}
+
+func TestSchemaRoundTripDistinguishesMapKeyAndValueNestedFields(t *testing.T) {
+	input := []byte(`{
+		"fields":[{"id":1,"name":"labels","type":{"type":"MAP",
+			"key":{"type":"ROW","fields":[{"id":2,"name":"name","type":"STRING"}]},
+			"value":{"type":"ROW","fields":[{"id":3,"name":"name","type":"STRING"}]}
+		}}],"partitionKeys":[],"primaryKeys":[],"options":{}
+	}`)
+	var schema Schema
+	require.NoError(t, json.Unmarshal(input, &schema))
+	assert.Equal(t, map[string]int{
+		"/key/fields/name":   2,
+		"/value/fields/name": 3,
+	}, schema.Fields[0].NestedFieldIDs)
+
+	encoded, err := json.Marshal(schema)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(input), string(encoded))
 }
 
 func TestDataTypeMarshalRejectsMalformedComposite(t *testing.T) {

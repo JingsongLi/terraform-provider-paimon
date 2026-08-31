@@ -235,7 +235,7 @@ func (r *permissionResource) Create(ctx context.Context, req resource.CreateRequ
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if r.readAfterMutation(ctx, &plan, &resp.Diagnostics) {
+	if r.readAfterMutation(ctx, &plan, assignment, &resp.Diagnostics) {
 		resp.Diagnostics.Append(resp.State.Set(stableCtx, &plan)...)
 	}
 }
@@ -296,7 +296,7 @@ func (r *permissionResource) Update(ctx context.Context, req resource.UpdateRequ
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if r.readAfterMutation(ctx, &plan, &resp.Diagnostics) {
+	if r.readAfterMutation(ctx, &plan, assignment, &resp.Diagnostics) {
 		resp.Diagnostics.Append(resp.State.Set(stableCtx, &plan)...)
 	}
 }
@@ -345,11 +345,13 @@ func (r *permissionResource) readIntoState(ctx context.Context, model *permissio
 	return !diags.HasError()
 }
 
-func (r *permissionResource) readAfterMutation(ctx context.Context, model *permissionResourceModel, diags *diag.Diagnostics) bool {
+func (r *permissionResource) readAfterMutation(ctx context.Context, model *permissionResourceModel, expected client.PermissionAssignment, diags *diag.Diagnostics) bool {
 	recoveryCtx, cancel := mutationRecoveryContext(ctx)
 	defer cancel()
-	assignment, found, err := retryLookup(recoveryCtx, func(attemptCtx context.Context) (client.PermissionAssignment, bool, error) {
+	assignment, found, converged, err := retryLookupUntil(recoveryCtx, func(attemptCtx context.Context) (client.PermissionAssignment, bool, error) {
 		return r.lookup(attemptCtx, *model)
+	}, func(observed client.PermissionAssignment) bool {
+		return permissionAssignmentsEquivalent(expected, observed)
 	})
 	if err != nil {
 		diags.AddError("Unable to verify Paimon permission after mutation", fmt.Sprintf("The permission mutation was accepted, but reconciliation failed: %s. Terraform retained the planned identity in state.", err))
@@ -361,6 +363,11 @@ func (r *permissionResource) readAfterMutation(ctx context.Context, model *permi
 
 		return false
 	}
+	if !converged {
+		diags.AddError("Unable to verify Paimon permission after mutation", "The REST Catalog accepted the permission mutation but the assignment did not converge to the planned attributes during bounded reconciliation. Terraform retained the planned identity in state.")
+
+		return false
+	}
 	setPermissionModel(recoveryCtx, model, assignment, diags)
 
 	return !diags.HasError()
@@ -369,8 +376,10 @@ func (r *permissionResource) readAfterMutation(ctx context.Context, model *permi
 func (r *permissionResource) reconcileFailedGrant(ctx context.Context, model permissionResourceModel, expected client.PermissionAssignment, grantErr error) (client.PermissionAssignment, bool, error) {
 	recoveryCtx, cancel := mutationRecoveryContext(ctx)
 	defer cancel()
-	observed, found, reconcileErr := retryLookup(recoveryCtx, func(attemptCtx context.Context) (client.PermissionAssignment, bool, error) {
+	observed, found, converged, reconcileErr := retryLookupUntil(recoveryCtx, func(attemptCtx context.Context) (client.PermissionAssignment, bool, error) {
 		return r.lookup(attemptCtx, model)
+	}, func(observed client.PermissionAssignment) bool {
+		return permissionAssignmentsEquivalent(expected, observed)
 	})
 	if reconcileErr != nil {
 		return client.PermissionAssignment{}, false, fmt.Errorf("granting the permission failed (%s), and bounded reconciliation could not establish the remote state: %w", grantErr, reconcileErr)
@@ -378,7 +387,7 @@ func (r *permissionResource) reconcileFailedGrant(ctx context.Context, model per
 	if !found {
 		return client.PermissionAssignment{}, false, fmt.Errorf("granting the permission failed, and bounded reconciliation confirmed that the assignment is absent: %w", grantErr)
 	}
-	if !permissionAssignmentsEquivalent(expected, observed) {
+	if !converged {
 		return client.PermissionAssignment{}, false, fmt.Errorf("granting the permission failed (%s), and the same identity exists with different permission attributes", grantErr)
 	}
 

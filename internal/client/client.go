@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,7 +36,12 @@ import (
 const (
 	userAgent              = "terraform-provider-paimon"
 	maxAPIResponseBodySize = 16 << 20
+	maxReadAttempts        = 3
+	baseReadRetryDelay     = 100 * time.Millisecond
+	maxReadRetryDelay      = 2 * time.Second
 )
+
+var errMutationOutcomeUncertain = errors.New("call Paimon REST API")
 
 type Config struct {
 	URI          string
@@ -70,18 +76,28 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
-	message := e.Message
-	if message == "" {
-		message = http.StatusText(e.StatusCode)
+	if e.Code != 0 {
+		return fmt.Sprintf("Paimon REST API returned HTTP %d with code %d", e.StatusCode, e.Code)
 	}
 
-	return fmt.Sprintf("Paimon REST API returned HTTP %d: %s", e.StatusCode, message)
+	return fmt.Sprintf("Paimon REST API returned HTTP %d", e.StatusCode)
 }
 
 func IsNotFound(err error) bool {
 	var apiErr *APIError
 
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
+
+// IsMutationOutcomeUncertain reports whether a failed mutation may have been
+// accepted remotely despite the client receiving an error.
+func IsMutationOutcomeUncertain(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusTooManyRequests || apiErr.StatusCode >= http.StatusInternalServerError
+	}
+
+	return errors.Is(err, errMutationOutcomeUncertain)
 }
 
 func New(config Config) (*Client, error) {
@@ -276,28 +292,58 @@ func (c *Client) doRaw(ctx context.Context, method string, segments []string, qu
 		requestBody = encoded
 	}
 
-	endpoint := c.endpoint(segments, query)
-	request, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(requestBody))
-	if err != nil {
-		return fmt.Errorf("create Paimon REST request: %w", err)
+	attempts := 1
+	if method == http.MethodGet || method == http.MethodHead {
+		attempts = maxReadAttempts
 	}
-	request.Header.Set("Accept", "application/json")
-	request.Header.Set("User-Agent", userAgent)
-	if len(requestBody) > 0 {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	for key, value := range headers {
-		request.Header.Set(key, value)
-	}
-	if c.auth != nil {
-		if err := c.auth.Apply(ctx, request, logicalResourcePath(segments), query, requestBody); err != nil {
-			return fmt.Errorf("authenticate Paimon REST request: %w", err)
+	var response *http.Response
+	for attempt := 0; attempt < attempts; attempt++ {
+		endpoint := c.endpoint(segments, query)
+		request, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(requestBody))
+		if err != nil {
+			return errors.New("create Paimon REST request")
 		}
-	}
+		request.Header.Set("Accept", "application/json")
+		request.Header.Set("User-Agent", userAgent)
+		if len(requestBody) > 0 {
+			request.Header.Set("Content-Type", "application/json")
+		}
+		for key, value := range headers {
+			request.Header.Set(key, value)
+		}
+		if c.auth != nil {
+			if err := c.auth.Apply(ctx, request, request.URL.EscapedPath(), request.URL.Query(), requestBody); err != nil {
+				return fmt.Errorf("authenticate Paimon REST request: %w", err)
+			}
+		}
 
-	response, err := c.httpClient.Do(request)
-	if err != nil {
-		return fmt.Errorf("call Paimon REST API: %w", err)
+		response, err = c.httpClient.Do(request)
+		if err != nil {
+			if strings.Contains(err.Error(), "Paimon REST API redirects are not allowed") {
+				return errors.New("call Paimon REST API: redirects are not allowed")
+			}
+			if attempt < attempts-1 && ctx.Err() == nil {
+				if err := waitForReadRetry(ctx, baseReadRetryDelay<<attempt); err != nil {
+					return err
+				}
+
+				continue
+			}
+
+			return errMutationOutcomeUncertain
+		}
+		if attempt < attempts-1 && retryableReadStatus(response.StatusCode) {
+			delay := readRetryDelay(response.Header.Get("Retry-After"), attempt, time.Now())
+			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+			_ = response.Body.Close()
+			if err := waitForReadRetry(ctx, delay); err != nil {
+				return err
+			}
+
+			continue
+		}
+
+		break
 	}
 	defer response.Body.Close()
 
@@ -327,6 +373,38 @@ func (c *Client) doRaw(ctx context.Context, method string, segments []string, qu
 	}
 
 	return nil
+}
+
+func retryableReadStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
+}
+
+func readRetryDelay(retryAfter string, attempt int, now time.Time) time.Duration {
+	delay := baseReadRetryDelay << attempt
+	if seconds, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && seconds >= 0 {
+		delay = time.Duration(seconds) * time.Second
+	} else if retryAt, err := http.ParseTime(retryAfter); err == nil {
+		delay = retryAt.Sub(now)
+		if delay < 0 {
+			delay = 0
+		}
+	}
+	if delay > maxReadRetryDelay {
+		return maxReadRetryDelay
+	}
+
+	return delay
+}
+
+func waitForReadRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func noRedirectHTTPClient(input *http.Client) *http.Client {

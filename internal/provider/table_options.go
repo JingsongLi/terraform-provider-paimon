@@ -51,6 +51,7 @@ var immutableTableOptions = map[string]struct{}{
 	"rowkind.field":                                  {},
 	"sequence.snapshot-ordering":                     {},
 	"type":                                           {},
+	"video-frame-field":                              {},
 }
 
 type reservedTableOptionsValidator struct{}

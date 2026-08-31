@@ -533,9 +533,9 @@ func createPolicyWithReconciliation(ctx context.Context, api *client.Client, spe
 	createErr := api.CreatePolicy(ctx, spec.database, spec.table, spec.request)
 	recoveryCtx, cancel := mutationRecoveryContext(ctx)
 	defer cancel()
-	observed, found, reconcileErr := retryLookup(recoveryCtx, func(attemptCtx context.Context) (client.DataPolicy, bool, error) {
+	observed, found, converged, reconcileErr := retryLookupUntil(recoveryCtx, func(attemptCtx context.Context) (client.DataPolicy, bool, error) {
 		return lookupPolicy(attemptCtx, api, spec)
-	})
+	}, spec.matches)
 	if createErr == nil {
 		result := policyCreateResult{accepted: true}
 		if reconcileErr != nil {
@@ -549,7 +549,7 @@ func createPolicyWithReconciliation(ctx context.Context, api *client.Client, spe
 			return result
 		}
 		result.observed = &observed
-		if !spec.matches(observed) {
+		if !converged {
 			result.err = fmt.Errorf("the REST Catalog accepted the %s but returned non-equivalent policy content during reconciliation", spec.label)
 		}
 
@@ -561,7 +561,7 @@ func createPolicyWithReconciliation(ctx context.Context, api *client.Client, spe
 	if !found {
 		return policyCreateResult{err: fmt.Errorf("creating the %s failed, and bounded reconciliation confirmed that the policy is absent: %w", spec.label, createErr)}
 	}
-	if !spec.matches(observed) {
+	if !converged {
 		return policyCreateResult{observed: &observed, err: fmt.Errorf("creating the %s failed (%s), and the same identity exists with different policy content", spec.label, createErr)}
 	}
 
@@ -579,19 +579,32 @@ type policyReplacementResult struct {
 	err      error
 }
 
+type policyLookupObservation struct {
+	policy client.DataPolicy
+	found  bool
+}
+
 func replacePolicyWithReconciliation(ctx context.Context, api *client.Client, previous, desired policySpec) policyReplacementResult {
 	mutationCtx := ctx
 	dropErr := api.DropPolicy(ctx, desired.database, desired.table, desired.policyType, desired.principal, desired.column)
 	if dropErr != nil && !client.IsNotFound(dropErr) {
 		recoveryCtx, cancel := mutationRecoveryContext(ctx)
 		defer cancel()
-		observed, found, reconcileErr := retryLookup(recoveryCtx, func(attemptCtx context.Context) (client.DataPolicy, bool, error) {
-			return lookupPolicy(attemptCtx, api, desired)
+		observation, _, _, reconcileErr := retryLookupUntil(recoveryCtx, func(attemptCtx context.Context) (policyLookupObservation, bool, error) {
+			observed, found, lookupErr := lookupPolicy(attemptCtx, api, desired)
+			if lookupErr != nil {
+				return policyLookupObservation{}, false, lookupErr
+			}
+
+			return policyLookupObservation{policy: observed, found: found}, true, nil
+		}, func(observed policyLookupObservation) bool {
+			return !observed.found || desired.matches(observed.policy)
 		})
 		if reconcileErr != nil {
 			return policyReplacementResult{err: fmt.Errorf("dropping the previous %s returned an error (%s), and bounded reconciliation could not establish the remote state: %w", previous.label, dropErr, reconcileErr)}
 		}
-		if found {
+		if observation.found {
+			observed := observation.policy
 			switch {
 			case desired.matches(observed):
 				return policyReplacementResult{
@@ -605,7 +618,7 @@ func replacePolicyWithReconciliation(ctx context.Context, api *client.Client, pr
 				return policyReplacementResult{observed: &observed, err: fmt.Errorf("dropping the previous %s returned an error (%s), and reconciliation found unexpected policy content for the same identity", previous.label, dropErr)}
 			}
 		}
-		mutationCtx = recoveryCtx
+		mutationCtx = context.WithoutCancel(ctx)
 	}
 
 	created := createPolicyWithReconciliation(mutationCtx, api, desired)

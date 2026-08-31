@@ -19,7 +19,6 @@ package provider
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/apache/terraform-provider-paimon/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -92,7 +91,7 @@ func (d *tableDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 	if name == "" {
 		name = data.Name.ValueString()
 	}
-	data.ID = types.StringValue(fmt.Sprintf("%s.%s", database, name))
+	data.ID = types.StringValue(tableID(database, name))
 	data.CatalogID = types.StringValue(table.ID)
 	data.Database = types.StringValue(database)
 	data.Name = types.StringValue(name)

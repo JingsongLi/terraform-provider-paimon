@@ -1,3 +1,10 @@
+---
+page_title: "paimon_database Resource - Paimon"
+subcategory: ""
+description: |-
+  Creates and manages a database in an Apache Paimon REST Catalog.
+---
+
 <!--
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements. See the NOTICE file

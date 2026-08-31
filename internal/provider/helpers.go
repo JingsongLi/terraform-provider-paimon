@@ -32,7 +32,6 @@ import (
 
 const (
 	mutationRecoveryTimeout = 5 * time.Second
-	mutationReadAttempts    = 3
 	mutationReadRetryDelay  = 50 * time.Millisecond
 )
 
@@ -131,33 +130,37 @@ func mutationRecoveryContext(ctx context.Context) (context.Context, context.Canc
 	return context.WithTimeout(context.WithoutCancel(ctx), mutationRecoveryTimeout)
 }
 
-func retryLookup[T any](ctx context.Context, lookup func(context.Context) (T, bool, error)) (T, bool, error) {
+func retryLookupUntil[T any](ctx context.Context, lookup func(context.Context) (T, bool, error), ready func(T) bool) (T, bool, bool, error) {
 	var zero T
+	var lastValue T
+	var lastFound bool
 	var lastErr error
-	for attempt := 0; attempt < mutationReadAttempts; attempt++ {
+	for {
 		value, found, err := lookup(ctx)
 		if err == nil {
 			lastErr = nil
 			if found {
-				return value, true, nil
+				lastValue = value
+				lastFound = true
+				if ready == nil || ready(value) {
+					return value, true, true, nil
+				}
 			}
 		} else {
 			lastErr = err
-		}
-		if attempt == mutationReadAttempts-1 {
-			break
 		}
 		timer := time.NewTimer(mutationReadRetryDelay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			if lastFound {
+				return lastValue, true, false, lastErr
+			}
 
-			return zero, false, ctx.Err()
+			return zero, false, false, lastErr
 		case <-timer.C:
 		}
 	}
-
-	return zero, false, lastErr
 }
 
 func syncManagedOptions(ctx context.Context, managed types.Map, remote map[string]string, diags *diag.Diagnostics) types.Map {
