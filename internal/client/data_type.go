@@ -58,6 +58,34 @@ type structuredField struct {
 	DefaultValue *string `json:"defaultValue,omitempty"`
 }
 
+// SchemaChangeDataType preserves nested ROW field IDs when a data type is
+// serialized as part of an ALTER TABLE schema change.
+type SchemaChangeDataType struct {
+	Type           DataType
+	NestedFieldIDs map[string]int
+	UsedFieldIDs   []int
+}
+
+func (t SchemaChangeDataType) MarshalJSON() ([]byte, error) {
+	used := make(map[int]struct{}, len(t.UsedFieldIDs))
+	nextFieldID := -1
+	for _, fieldID := range t.UsedFieldIDs {
+		if fieldID < 0 || fieldID > maxPaimonFieldID {
+			return nil, fmt.Errorf("Paimon field ID must be between 0 and %d", maxPaimonFieldID)
+		}
+		used[fieldID] = struct{}{}
+		if fieldID > nextFieldID {
+			nextFieldID = fieldID
+		}
+	}
+	encoded, err := encodeDataTypeWithIDs(string(t.Type), &nextFieldID, t.NestedFieldIDs, "", used)
+	if err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(encoded)
+}
+
 // MarshalJSON coordinates nested ROW field IDs across the complete schema.
 // Paimon requires nested fields to carry IDs when their parent field has one.
 func (s Schema) MarshalJSON() ([]byte, error) {
@@ -85,7 +113,7 @@ func (s Schema) MarshalJSON() ([]byte, error) {
 	}
 	fields := make([]structuredField, 0, len(s.Fields))
 	for _, field := range s.Fields {
-		encodedType, err := encodeDataType(string(field.Type), &nextFieldID)
+		encodedType, err := encodeDataTypeWithIDs(string(field.Type), &nextFieldID, field.NestedFieldIDs, "", usedFieldIDs)
 		if err != nil {
 			return nil, fmt.Errorf("encode Paimon field %q type: %w", field.Name, err)
 		}
@@ -108,6 +136,10 @@ func (s Schema) MarshalJSON() ([]byte, error) {
 }
 
 func encodeDataType(input string, nextFieldID *int) (any, error) {
+	return encodeDataTypeWithIDs(input, nextFieldID, nil, "", make(map[int]struct{}))
+}
+
+func encodeDataTypeWithIDs(input string, nextFieldID *int, nestedFieldIDs map[string]int, parentPath string, usedFieldIDs map[int]struct{}) (any, error) {
 	typeName, notNull := stripNotNull(input)
 	root, body, composite, err := compositeTypeParts(typeName)
 	if err != nil {
@@ -119,7 +151,7 @@ func encodeDataType(input string, nextFieldID *int) (any, error) {
 			if elementType == "" {
 				return nil, fmt.Errorf("invalid suffix collection type %q: missing element type", input)
 			}
-			element, err := encodeDataType(elementType, nextFieldID)
+			element, err := encodeDataTypeWithIDs(elementType, nextFieldID, nestedFieldIDs, nestedContainerPath(parentPath, "element"), usedFieldIDs)
 			if err != nil {
 				return nil, err
 			}
@@ -148,7 +180,7 @@ func encodeDataType(input string, nextFieldID *int) (any, error) {
 		if len(parts) != 1 || strings.TrimSpace(parts[0]) == "" {
 			return nil, fmt.Errorf("invalid %s type %q: expected one element type", root, input)
 		}
-		element, err := encodeDataType(parts[0], nextFieldID)
+		element, err := encodeDataTypeWithIDs(parts[0], nextFieldID, nestedFieldIDs, nestedContainerPath(parentPath, "element"), usedFieldIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -158,11 +190,11 @@ func encodeDataType(input string, nextFieldID *int) (any, error) {
 		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
 			return nil, fmt.Errorf("invalid MAP type %q: expected key and value types", input)
 		}
-		key, err := encodeDataType(parts[0], nextFieldID)
+		key, err := encodeDataTypeWithIDs(parts[0], nextFieldID, nestedFieldIDs, nestedContainerPath(parentPath, "key"), usedFieldIDs)
 		if err != nil {
 			return nil, err
 		}
-		value, err := encodeDataType(parts[1], nextFieldID)
+		value, err := encodeDataTypeWithIDs(parts[1], nextFieldID, nestedFieldIDs, nestedContainerPath(parentPath, "value"), usedFieldIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -172,7 +204,7 @@ func encodeDataType(input string, nextFieldID *int) (any, error) {
 		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
 			return nil, fmt.Errorf("invalid VECTOR type %q: expected element type and length", input)
 		}
-		element, err := encodeDataType(parts[0], nextFieldID)
+		element, err := encodeDataTypeWithIDs(parts[0], nextFieldID, nestedFieldIDs, nestedContainerPath(parentPath, "element"), usedFieldIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -192,12 +224,32 @@ func encodeDataType(input string, nextFieldID *int) (any, error) {
 			if err != nil {
 				return nil, fmt.Errorf("invalid ROW type %q: %w", input, err)
 			}
-			if *nextFieldID >= maxPaimonFieldID {
-				return nil, fmt.Errorf("Paimon nested field IDs exceed %d", maxPaimonFieldID)
+			path := nestedFieldPath(parentPath, name)
+			fieldID, configured := nestedFieldIDs[path]
+			if configured {
+				if fieldID < 0 || fieldID > maxPaimonFieldID {
+					return nil, fmt.Errorf("Paimon nested field %q ID must be between 0 and %d", path, maxPaimonFieldID)
+				}
+				if _, duplicate := usedFieldIDs[fieldID]; duplicate {
+					return nil, fmt.Errorf("Paimon field ID %d is duplicated", fieldID)
+				}
+				if fieldID > *nextFieldID {
+					*nextFieldID = fieldID
+				}
+			} else {
+				for {
+					if *nextFieldID >= maxPaimonFieldID {
+						return nil, fmt.Errorf("Paimon nested field IDs exceed %d", maxPaimonFieldID)
+					}
+					*nextFieldID = *nextFieldID + 1
+					fieldID = *nextFieldID
+					if _, duplicate := usedFieldIDs[fieldID]; !duplicate {
+						break
+					}
+				}
 			}
-			*nextFieldID = *nextFieldID + 1
-			fieldID := *nextFieldID
-			encodedType, err := encodeDataType(fieldType, nextFieldID)
+			usedFieldIDs[fieldID] = struct{}{}
+			encodedType, err := encodeDataTypeWithIDs(fieldType, nextFieldID, nestedFieldIDs, path, usedFieldIDs)
 			if err != nil {
 				return nil, err
 			}
@@ -226,6 +278,19 @@ func EquivalentDataTypes(left, right DataType) bool {
 	canonicalRight, err := canonicalDataType(right)
 
 	return err == nil && canonicalLeft == canonicalRight
+}
+
+// IsCompositeDataType reports whether the outer type is a collection, ROW, or
+// VECTOR. Replacing the complete shape of one of these types is not a safe
+// UpdateColumnType operation because nested field IDs may change.
+func IsCompositeDataType(value DataType) bool {
+	typeName, _ := stripNotNull(string(value))
+	_, _, composite, err := compositeTypeParts(typeName)
+	if err == nil && composite {
+		return true
+	}
+
+	return suffixCollectionPattern.MatchString(typeName)
 }
 
 func canonicalDataType(value DataType) (DataType, error) {

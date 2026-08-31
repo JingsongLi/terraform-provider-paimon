@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: build check check-license fmt fmt-check test test-race vet
+.PHONY: build check check-license fmt fmt-check fmt-terraform test test-acceptance test-race validate-examples vet
 
 build:
 	go build ./...
@@ -24,8 +24,17 @@ fmt:
 fmt-check:
 	@test -z "$$(gofmt -l .)"
 
+fmt-terraform:
+	terraform fmt -check -recursive examples
+
+validate-examples: fmt-terraform
+	dev/validate_examples.sh
+
 test:
 	go test ./...
+
+test-acceptance:
+	TF_ACC=1 go test -v ./internal/provider -run '^TestAcc'
 
 test-race:
 	go test -race ./...
@@ -33,7 +42,7 @@ test-race:
 vet:
 	go vet ./...
 
-check: fmt-check vet test-race build
+check: fmt-check vet test-race build validate-examples
 
 check-license:
 	dev/check-license

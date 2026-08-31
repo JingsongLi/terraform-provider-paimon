@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -135,7 +136,7 @@ func newDLFAuthenticator(endpoint *url.URL, config DLFConfig, defaultHTTPClient 
 
 	region := strings.TrimSpace(config.Region)
 	if region == "" && algorithm == DLFSigningDefault {
-		region = parseDLFRegion(endpoint.String())
+		region = parseDLFRegion(endpoint.Hostname())
 	}
 	if algorithm == DLFSigningDefault && region == "" {
 		return nil, errors.New("DLF region is required when it cannot be inferred from the endpoint")
@@ -235,10 +236,25 @@ func (p *refreshingDLFCredentialProvider) Credentials(ctx context.Context) (dlfC
 	}
 	credentials, err := p.loader.Load(ctx)
 	if err != nil {
+		if p.current != nil && p.currentUsable(*p.current) {
+			return *p.current, nil
+		}
+
 		return dlfCredentials{}, err
 	}
 	if err := credentials.validate(); err != nil {
+		if p.current != nil && p.currentUsable(*p.current) {
+			return *p.current, nil
+		}
+
 		return dlfCredentials{}, err
+	}
+	if !p.currentUsable(credentials) {
+		if p.current != nil && p.currentUsable(*p.current) {
+			return *p.current, nil
+		}
+
+		return dlfCredentials{}, errors.New("loaded DLF credentials are expired")
 	}
 	p.current = &credentials
 
@@ -251,6 +267,10 @@ func (p *refreshingDLFCredentialProvider) shouldRefresh(credentials dlfCredentia
 	}
 
 	return credentials.expiresAt.Sub(p.now()) < p.refreshBefore
+}
+
+func (p *refreshingDLFCredentialProvider) currentUsable(credentials dlfCredentials) bool {
+	return credentials.expiresAt == nil || credentials.expiresAt.After(p.now())
 }
 
 func newDLFCredentialProvider(config DLFConfig, httpClient *http.Client) (dlfCredentialProvider, error) {
@@ -637,13 +657,22 @@ func hmacSHA256(key []byte, value string) []byte {
 }
 
 func parseDLFRegion(host string) string {
-	pattern := regexp.MustCompile(`(?:pre-)?([a-z]+-[a-z]+(?:-[0-9]+)?)`)
-	match := pattern.FindStringSubmatch(strings.ToLower(host))
-	if len(match) < 2 {
-		return ""
+	host = strings.ToLower(strings.TrimSpace(host))
+	if endpoint, err := url.Parse(host); err == nil && endpoint.Hostname() != "" {
+		host = endpoint.Hostname()
+	} else if hostname, _, err := net.SplitHostPort(host); err == nil {
+		host = hostname
+	}
+	pattern := regexp.MustCompile(`^[a-z]{2}-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	for _, label := range strings.Split(host, ".") {
+		candidate := strings.TrimPrefix(label, "pre-")
+		candidate = strings.TrimSuffix(candidate, "-vpc")
+		if pattern.MatchString(candidate) {
+			return candidate
+		}
 	}
 
-	return match[1]
+	return ""
 }
 
 func javaFormEncode(value string) string {

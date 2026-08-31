@@ -1,3 +1,10 @@
+---
+page_title: "paimon_row_filter Resource - Paimon"
+subcategory: ""
+description: |-
+  Manages a row filter policy for an Apache Paimon table.
+---
+
 <!--
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements. See the NOTICE file

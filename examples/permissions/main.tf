@@ -88,7 +88,7 @@ resource "paimon_column_mask" "analyst_email" {
   principal = paimon_permission.analyst_select.principal
   column    = "email"
   transform = jsonencode({
-    name = "CONCAT"
+    name   = "CONCAT"
     inputs = ["***@***.com"]
   })
 }

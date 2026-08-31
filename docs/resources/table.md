@@ -1,3 +1,10 @@
+---
+page_title: "paimon_table Resource - Paimon"
+subcategory: ""
+description: |-
+  Creates, evolves, and manages a table in an Apache Paimon REST Catalog.
+---
+
 <!--
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements. See the NOTICE file
@@ -46,15 +53,22 @@ resource "paimon_table" "example" {
 ```
 
 Each field supports `id`, `name`, `type`, `nullable`, `description`, and
-`default_value`. Field IDs must be unique integers from 0 through 1073741822;
-the next available ID is assigned when omitted. Use
+`default_value`. `nested_field_ids` is a computed map that preserves the stable
+IDs of nested ROW fields. Top-level field IDs must be unique integers from 0
+through 1073741822; the next available ID is assigned when omitted. Use
 canonical Paimon SQL type strings such as `INT`, `BIGINT`, `STRING`,
 `DECIMAL(12, 2)`, `ARRAY<STRING>`, or `ROW<item STRING>`.
 
-`database`, `name`, `fields`, `partition_keys`, and `primary_keys` are
-replacement attributes. Configure keys with `primary_keys` and
-`partition_keys`; the normalized Paimon options `primary-key` and `partition`
-are rejected in `options` because the server removes them from its options map.
+Supported top-level field additions, drops, renames, atomic type/nullability
+changes, comments, defaults, and position changes use Paimon's in-place
+`SchemaChange` API. Stable field IDs distinguish a rename from a drop plus add.
+Rename cycles require an intermediate name. Changing an existing composite
+`ROW`, `ARRAY`, `MAP`, `MULTISET`, or `VECTOR` shape replaces the table because
+a whole-type update cannot safely preserve its nested IDs. `database`, `name`,
+`partition_keys`, and `primary_keys` also remain replacement attributes.
+Configure keys with `primary_keys` and `partition_keys`; the
+normalized Paimon options `primary-key` and `partition` are rejected in
+`options` because the server removes them from its options map.
 
 Mutable `options` and `comment` update in place. Changing or removing an option
 that Paimon defines as immutable, such as `merge-engine`, `bucket-key`, `type`,
@@ -70,8 +84,9 @@ lifecycle {
 }
 ```
 
-Import with `database.table`:
+Import with the unambiguous URL-query identity. The legacy `database.table`
+form remains accepted when names do not contain dots:
 
 ```bash
-terraform import paimon_table.example analytics.events
+terraform import paimon_table.example 'database=analytics&table=events'
 ```

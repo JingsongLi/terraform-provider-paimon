@@ -1,3 +1,10 @@
+---
+page_title: "paimon_permission Resource - Paimon"
+subcategory: ""
+description: |-
+  Manages a direct Apache Paimon catalog permission assignment.
+---
+
 <!--
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements. See the NOTICE file

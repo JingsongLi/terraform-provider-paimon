@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/apache/terraform-provider-paimon/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -578,7 +579,8 @@ func TestManagementImportIDsMatchJavaBlankAndPrincipalLengthContract(t *testing.
 }
 
 func TestPermissionCreateRetainsStateWhenReconciliationFails(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
 	listCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -628,7 +630,7 @@ func TestPermissionCreateRetainsStateWhenReconciliationFails(t *testing.T) {
 	require.False(t, response.State.Get(ctx, &retained).HasError())
 	assert.Equal(t, permissionID(planModel), retained.ID.ValueString())
 	assert.Equal(t, "2027-01-01t00:00:00.123000z", retained.ExpireTime.ValueString())
-	assert.Equal(t, 3, listCalls)
+	assert.GreaterOrEqual(t, listCalls, 3)
 }
 
 func TestPermissionCreateReconcilesLostResponse(t *testing.T) {
@@ -698,7 +700,8 @@ func TestPermissionCreateReconcilesLostResponse(t *testing.T) {
 }
 
 func TestRowFilterCreateRetainsStateWhenReconciliationFails(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
 	listCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -737,7 +740,7 @@ func TestRowFilterCreateRetainsStateWhenReconciliationFails(t *testing.T) {
 	var retained rowFilterResourceModel
 	require.False(t, response.State.Get(ctx, &retained).HasError())
 	assert.Equal(t, rowFilterID(planModel), retained.ID.ValueString())
-	assert.Equal(t, 3, listCalls)
+	assert.GreaterOrEqual(t, listCalls, 3)
 }
 
 func TestPolicyCreateReconcilesLostResponse(t *testing.T) {

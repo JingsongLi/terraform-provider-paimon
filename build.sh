@@ -32,7 +32,7 @@ esac
 mirror_root="$(pwd)/terraform-plugins"
 install_path="${mirror_root}/registry.terraform.io/${provider_namespace}/${provider_type}/${provider_version}/${provider_os}_${provider_arch}"
 
-go build -o "${binary_name}" .
+go build -trimpath -ldflags "-s -w -X main.version=${provider_version}" -o "${binary_name}" .
 mkdir -p "${install_path}"
 mv "${binary_name}" "${install_path}/"
 chmod +x "${install_path}/${binary_name}"

@@ -1,3 +1,9 @@
+---
+page_title: "Paimon Provider"
+description: |-
+  Manage Apache Paimon REST Catalog metadata, permissions, and table data policies with Terraform.
+---
+
 <!--
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements. See the NOTICE file

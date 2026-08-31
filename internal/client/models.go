@@ -67,11 +67,12 @@ type Schema struct {
 }
 
 type Field struct {
-	ID           int      `json:"id"`
-	Name         string   `json:"name"`
-	Type         DataType `json:"type"`
-	Description  *string  `json:"description,omitempty"`
-	DefaultValue *string  `json:"defaultValue,omitempty"`
+	ID             int            `json:"id"`
+	Name           string         `json:"name"`
+	Type           DataType       `json:"type"`
+	Description    *string        `json:"description,omitempty"`
+	DefaultValue   *string        `json:"defaultValue,omitempty"`
+	NestedFieldIDs map[string]int `json:"-"`
 }
 
 type Table struct {
@@ -116,11 +117,47 @@ func (t DataType) MarshalJSON() ([]byte, error) {
 }
 
 func (t *DataType) UnmarshalJSON(data []byte) error {
+	decoded, _, err := decodeDataTypeJSON(data, "", make(map[string]int))
+	if err != nil {
+		return err
+	}
+	*t = decoded
+
+	return nil
+}
+
+func (f *Field) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID           int             `json:"id"`
+		Name         string          `json:"name"`
+		Type         json.RawMessage `json:"type"`
+		Description  *string         `json:"description"`
+		DefaultValue *string         `json:"defaultValue"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("decode Paimon field: %w", err)
+	}
+	nestedFieldIDs := make(map[string]int)
+	dataType, _, err := decodeDataTypeJSON(raw.Type, "", nestedFieldIDs)
+	if err != nil {
+		return fmt.Errorf("decode Paimon field %q type: %w", raw.Name, err)
+	}
+	*f = Field{
+		ID:             raw.ID,
+		Name:           raw.Name,
+		Type:           dataType,
+		Description:    raw.Description,
+		DefaultValue:   raw.DefaultValue,
+		NestedFieldIDs: nestedFieldIDs,
+	}
+
+	return nil
+}
+
+func decodeDataTypeJSON(data []byte, parentPath string, nestedFieldIDs map[string]int) (DataType, map[string]int, error) {
 	var primitive string
 	if err := json.Unmarshal(data, &primitive); err == nil {
-		*t = DataType(primitive)
-
-		return nil
+		return DataType(primitive), nestedFieldIDs, nil
 	}
 
 	var structured struct {
@@ -128,11 +165,17 @@ func (t *DataType) UnmarshalJSON(data []byte) error {
 		Element json.RawMessage `json:"element"`
 		Key     json.RawMessage `json:"key"`
 		Value   json.RawMessage `json:"value"`
-		Fields  []Field         `json:"fields"`
-		Length  int             `json:"length"`
+		Fields  []struct {
+			ID           int             `json:"id"`
+			Name         string          `json:"name"`
+			Type         json.RawMessage `json:"type"`
+			Description  *string         `json:"description"`
+			DefaultValue *string         `json:"defaultValue"`
+		} `json:"fields"`
+		Length int `json:"length"`
 	}
 	if err := json.Unmarshal(data, &structured); err != nil {
-		return fmt.Errorf("decode Paimon data type: %w", err)
+		return "", nestedFieldIDs, fmt.Errorf("decode Paimon data type: %w", err)
 	}
 
 	typeName := strings.TrimSpace(structured.Type)
@@ -142,25 +185,34 @@ func (t *DataType) UnmarshalJSON(data []byte) error {
 
 	switch root {
 	case "ARRAY", "MULTISET":
-		element, err := decodeNestedType(structured.Element)
+		element, err := decodeNestedType(structured.Element, nestedContainerPath(parentPath, "element"), nestedFieldIDs)
 		if err != nil {
-			return err
+			return "", nestedFieldIDs, err
 		}
 		sqlType = fmt.Sprintf("%s<%s>", root, element)
 	case "MAP":
-		key, err := decodeNestedType(structured.Key)
+		key, err := decodeNestedType(structured.Key, nestedContainerPath(parentPath, "key"), nestedFieldIDs)
 		if err != nil {
-			return err
+			return "", nestedFieldIDs, err
 		}
-		value, err := decodeNestedType(structured.Value)
+		value, err := decodeNestedType(structured.Value, nestedContainerPath(parentPath, "value"), nestedFieldIDs)
 		if err != nil {
-			return err
+			return "", nestedFieldIDs, err
 		}
 		sqlType = fmt.Sprintf("MAP<%s, %s>", key, value)
 	case "ROW":
 		fields := make([]string, 0, len(structured.Fields))
 		for _, field := range structured.Fields {
-			part := quoteIdentifier(field.Name) + " " + string(field.Type)
+			path := nestedFieldPath(parentPath, field.Name)
+			if _, duplicate := nestedFieldIDs[path]; duplicate {
+				return "", nestedFieldIDs, fmt.Errorf("duplicate nested Paimon field path %q", path)
+			}
+			nestedFieldIDs[path] = field.ID
+			fieldType, _, err := decodeDataTypeJSON(field.Type, path, nestedFieldIDs)
+			if err != nil {
+				return "", nestedFieldIDs, err
+			}
+			part := quoteIdentifier(field.Name) + " " + string(fieldType)
 			if field.Description != nil && *field.Description != "" {
 				part += " COMMENT '" + strings.ReplaceAll(*field.Description, "'", "''") + "'"
 			}
@@ -171,33 +223,41 @@ func (t *DataType) UnmarshalJSON(data []byte) error {
 		}
 		sqlType = "ROW<" + strings.Join(fields, ", ") + ">"
 	case "VECTOR":
-		element, err := decodeNestedType(structured.Element)
+		element, err := decodeNestedType(structured.Element, nestedContainerPath(parentPath, "element"), nestedFieldIDs)
 		if err != nil {
-			return err
+			return "", nestedFieldIDs, err
 		}
 		sqlType = fmt.Sprintf("VECTOR<%s, %s>", element, strconv.Itoa(structured.Length))
 	default:
-		return fmt.Errorf("unsupported structured Paimon data type %q", structured.Type)
+		return "", nestedFieldIDs, fmt.Errorf("unsupported structured Paimon data type %q", structured.Type)
 	}
 
 	if notNull {
 		sqlType += " NOT NULL"
 	}
-	*t = DataType(sqlType)
-
-	return nil
+	return DataType(sqlType), nestedFieldIDs, nil
 }
 
-func decodeNestedType(data json.RawMessage) (string, error) {
+func decodeNestedType(data json.RawMessage, parentPath string, nestedFieldIDs map[string]int) (string, error) {
 	if len(bytes.TrimSpace(data)) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return "", errors.New("structured Paimon data type is missing a nested type")
 	}
-	var nested DataType
-	if err := json.Unmarshal(data, &nested); err != nil {
+	nested, _, err := decodeDataTypeJSON(data, parentPath, nestedFieldIDs)
+	if err != nil {
 		return "", err
 	}
 
 	return string(nested), nil
+}
+
+func nestedFieldPath(parent, name string) string {
+	escaped := strings.ReplaceAll(strings.ReplaceAll(name, "~", "~0"), "/", "~1")
+
+	return parent + "/fields/" + escaped
+}
+
+func nestedContainerPath(parent, name string) string {
+	return parent + "/" + name
 }
 
 func quoteIdentifier(value string) string {

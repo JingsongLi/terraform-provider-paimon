@@ -20,5 +20,6 @@ go.sum
 build
 dist
 lib
+licenses-binary
 terraform-plugins
 terraform-registry-manifest.json

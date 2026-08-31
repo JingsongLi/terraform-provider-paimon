@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -103,13 +104,24 @@ func TestDLFPathAndQueryEncodingMatchesJava(t *testing.T) {
 		"a":     {"hello world"},
 	}))
 	assert.Equal(t, "cn-hangzhou", parseDLFRegion("pre-cn-hangzhou.example.com"))
-	assert.Equal(t, "dlf-vpc", parseDLFRegion("dlf-vpc.cn-hangzhou.aliyuncs.com"))
+	assert.Equal(t, "cn-hangzhou", parseDLFRegion("dlf-vpc.cn-hangzhou.aliyuncs.com"))
+	assert.Equal(t, "cn-hangzhou", parseDLFRegion("cn-hangzhou-vpc.dlf.aliyuncs.com"))
+	assert.Equal(t, "cn-shanghai", parseDLFRegion("https://dlf.cn-shanghai.aliyuncs.com/base"))
+	assert.Empty(t, parseDLFRegion("dlf-vpc.aliyuncs.com"))
 }
 
 type sequenceDLFTokenLoader struct {
 	mu          sync.Mutex
 	credentials []dlfCredentials
 	loads       int
+}
+
+type errorDLFTokenLoader struct {
+	err error
+}
+
+func (l errorDLFTokenLoader) Load(context.Context) (dlfCredentials, error) {
+	return dlfCredentials{}, l.err
 }
 
 func (l *sequenceDLFTokenLoader) Load(context.Context) (dlfCredentials, error) {
@@ -169,6 +181,57 @@ func TestRefreshingDLFCredentialProvider(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "second-id", credentials.AccessKeyID)
 	assert.Equal(t, 2, loader.loadCount())
+}
+
+func TestRefreshingDLFCredentialProviderUsesUnexpiredCredentialsWhenRefreshFails(t *testing.T) {
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(30 * time.Minute)
+	provider := &refreshingDLFCredentialProvider{
+		loader:        errorDLFTokenLoader{err: errors.New("temporary loader failure")},
+		refreshBefore: time.Hour,
+		now:           func() time.Time { return now },
+		current: &dlfCredentials{
+			AccessKeyID:     "cached-id",
+			AccessKeySecret: "cached-secret",
+			expiresAt:       &expiresAt,
+		},
+	}
+
+	credentials, err := provider.Credentials(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "cached-id", credentials.AccessKeyID)
+
+	now = expiresAt
+	_, err = provider.Credentials(context.Background())
+	require.EqualError(t, err, "temporary loader failure")
+}
+
+func TestRefreshingDLFCredentialProviderRejectsExpiredRefresh(t *testing.T) {
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	cachedExpiration := now.Add(30 * time.Minute)
+	loader := &sequenceDLFTokenLoader{credentials: []dlfCredentials{{
+		AccessKeyID:     "expired-id",
+		AccessKeySecret: "expired-secret",
+		Expiration:      now.Add(-time.Minute).Format(time.RFC3339),
+	}}}
+	provider := &refreshingDLFCredentialProvider{
+		loader:        loader,
+		refreshBefore: time.Hour,
+		now:           func() time.Time { return now },
+		current: &dlfCredentials{
+			AccessKeyID:     "cached-id",
+			AccessKeySecret: "cached-secret",
+			expiresAt:       &cachedExpiration,
+		},
+	}
+
+	credentials, err := provider.Credentials(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "cached-id", credentials.AccessKeyID)
+
+	provider.current = nil
+	_, err = provider.Credentials(context.Background())
+	require.EqualError(t, err, "loaded DLF credentials are expired")
 }
 
 func TestFileDLFTokenLoaderLoadsSTSAndDoesNotLeakMalformedContent(t *testing.T) {
@@ -276,6 +339,54 @@ func TestDLFClientSignsConfigAndCatalogRequests(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, api.CreateDatabase(context.Background(), "analytics", nil))
 	assert.Equal(t, int32(2), signedRequests.Load())
+}
+
+func TestDLFClientSignsFinalPathIncludingBasePath(t *testing.T) {
+	fixedTime := time.Date(2023, 12, 3, 12, 12, 12, 0, time.UTC)
+	credentials := dlfCredentials{AccessKeyID: "access-key-id", AccessKeySecret: "access-key-secret"}
+	for _, algorithm := range []string{DLFSigningDefault, DLFSigningOpenAPI} {
+		t.Run(algorithm, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, readErr := io.ReadAll(r.Body)
+				require.NoError(t, readErr)
+				var expected map[string]string
+				var err error
+				switch algorithm {
+				case DLFSigningDefault:
+					expected, err = signDLFDefault(r.Method, r.URL.EscapedPath(), r.URL.Query(), body, credentials, "cn-hangzhou", fixedTime)
+				case DLFSigningOpenAPI:
+					expected, err = signDLFOpenAPI(r.Method, r.URL.EscapedPath(), r.URL.Query(), body, credentials, r.Host, fixedTime, "fixed-nonce")
+				}
+				require.NoError(t, err)
+				assert.Equal(t, expected["Authorization"], r.Header.Get("Authorization"))
+
+				switch r.URL.Path {
+				case "/gateway/v1/config":
+					writeJSON(t, w, ConfigResponse{Defaults: map[string]string{"prefix": "catalog"}})
+				case "/gateway/v1/catalog/databases":
+					w.WriteHeader(http.StatusOK)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			api, err := New(Config{
+				URI:          server.URL + "/gateway/",
+				AuthProvider: AuthProviderDLF,
+				DLF: &DLFConfig{
+					Region:           "cn-hangzhou",
+					SigningAlgorithm: algorithm,
+					AccessKeyID:      credentials.AccessKeyID,
+					AccessKeySecret:  credentials.AccessKeySecret,
+					Now:              func() time.Time { return fixedTime },
+					Nonce:            func() (string, error) { return "fixed-nonce", nil },
+				},
+			})
+			require.NoError(t, err)
+			require.NoError(t, api.CreateDatabase(context.Background(), "analytics", nil))
+		})
+	}
 }
 
 func TestDLFClientReloadsRotatedTokenFile(t *testing.T) {

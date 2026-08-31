@@ -1,3 +1,10 @@
+---
+page_title: "paimon_database Data Source - Paimon"
+subcategory: ""
+description: |-
+  Reads metadata for an existing Apache Paimon database.
+---
+
 <!--
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements. See the NOTICE file

@@ -19,6 +19,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/apache/terraform-provider-paimon/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -111,14 +112,41 @@ func (r *databaseResource) Create(ctx context.Context, req resource.CreateReques
 		return
 	}
 	if err := r.client.CreateDatabase(ctx, plan.Name.ValueString(), options); err != nil {
-		resp.Diagnostics.AddError("Unable to create Paimon database", err.Error())
+		if !client.IsMutationOutcomeUncertain(err) {
+			resp.Diagnostics.AddError("Unable to create Paimon database", err.Error())
+
+			return
+		}
+		database, recoveryErr := r.lookupAfterMutation(ctx, plan.Name.ValueString(), func(observed *client.Database) bool {
+			return databaseMatchesOptions(observed, plan.Name.ValueString(), options, true)
+		})
+		if recoveryErr != nil {
+			resp.Diagnostics.AddError("Unable to create Paimon database", fmt.Sprintf("create request failed (%s), and bounded reconciliation could not establish the remote state: %s", err, recoveryErr))
+
+			return
+		}
+		setDatabaseResourceModel(context.WithoutCancel(ctx), &plan, database, &resp.Diagnostics)
+		resp.Diagnostics.Append(resp.State.Set(context.WithoutCancel(ctx), &plan)...)
+		resp.Diagnostics.AddWarning("Recovered Paimon database creation", "The create request returned an error, but bounded reconciliation found the exact database configuration that Terraform planned, so the resource was adopted into state.")
 
 		return
 	}
-	r.readIntoState(ctx, &plan, &resp.Diagnostics)
-	if !resp.Diagnostics.HasError() {
-		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	stableCtx := context.WithoutCancel(ctx)
+	plan.ID = types.StringValue(plan.Name.ValueString())
+	resp.Diagnostics.Append(resp.State.Set(stableCtx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
+	database, err := r.lookupAfterMutation(ctx, plan.Name.ValueString(), func(observed *client.Database) bool {
+		return databaseMatchesOptions(observed, plan.Name.ValueString(), options, false)
+	})
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to verify Paimon database after creation", err.Error()+". Terraform retained the planned database identity in state.")
+
+		return
+	}
+	setDatabaseResourceModel(stableCtx, &plan, database, &resp.Diagnostics)
+	resp.Diagnostics.Append(resp.State.Set(stableCtx, &plan)...)
 }
 
 func (r *databaseResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -159,15 +187,40 @@ func (r *databaseResource) Update(ctx context.Context, req resource.UpdateReques
 	removals, updates := diffOptions(before, after)
 	if len(removals) > 0 || len(updates) > 0 {
 		if err := r.client.AlterDatabase(ctx, plan.Name.ValueString(), removals, updates); err != nil {
+			if client.IsMutationOutcomeUncertain(err) {
+				database, recoveryErr := r.lookupAfterMutation(ctx, plan.Name.ValueString(), func(observed *client.Database) bool {
+					return databaseMatchesOptions(observed, plan.Name.ValueString(), after, false)
+				})
+				if recoveryErr == nil {
+					stableCtx := context.WithoutCancel(ctx)
+					setDatabaseResourceModel(stableCtx, &plan, database, &resp.Diagnostics)
+					resp.Diagnostics.Append(resp.State.Set(stableCtx, &plan)...)
+					resp.Diagnostics.AddWarning("Recovered Paimon database update", "The alter request returned an error, but bounded reconciliation found the exact managed database options that Terraform planned.")
+
+					return
+				}
+			}
 			resp.Diagnostics.AddError("Unable to update Paimon database", err.Error())
 
 			return
 		}
 	}
-	r.readIntoState(ctx, &plan, &resp.Diagnostics)
-	if !resp.Diagnostics.HasError() {
-		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	stableCtx := context.WithoutCancel(ctx)
+	plan.ID = types.StringValue(plan.Name.ValueString())
+	resp.Diagnostics.Append(resp.State.Set(stableCtx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
+	database, err := r.lookupAfterMutation(ctx, plan.Name.ValueString(), func(observed *client.Database) bool {
+		return databaseMatchesOptions(observed, plan.Name.ValueString(), after, false)
+	})
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to verify Paimon database after update", err.Error()+". Terraform retained the planned database state.")
+
+		return
+	}
+	setDatabaseResourceModel(stableCtx, &plan, database, &resp.Diagnostics)
+	resp.Diagnostics.Append(resp.State.Set(stableCtx, &plan)...)
 }
 
 func (r *databaseResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -186,14 +239,41 @@ func (r *databaseResource) ImportState(ctx context.Context, req resource.ImportS
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), req.ID)...)
 }
 
-func (r *databaseResource) readIntoState(ctx context.Context, model *databaseResourceModel, diags *diag.Diagnostics) {
-	database, err := r.client.GetDatabase(ctx, model.Name.ValueString())
-	if err != nil {
-		diags.AddError("Unable to read Paimon database after change", err.Error())
+func (r *databaseResource) lookupAfterMutation(ctx context.Context, name string, ready func(*client.Database) bool) (*client.Database, error) {
+	recoveryCtx, cancel := mutationRecoveryContext(ctx)
+	defer cancel()
+	database, found, converged, err := retryLookupUntil(recoveryCtx, func(attemptCtx context.Context) (*client.Database, bool, error) {
+		observed, lookupErr := r.client.GetDatabase(attemptCtx, name)
+		if client.IsNotFound(lookupErr) {
+			return nil, false, nil
+		}
 
-		return
+		return observed, lookupErr == nil, lookupErr
+	}, ready)
+	if err != nil {
+		return nil, err
 	}
-	setDatabaseResourceModel(ctx, model, database, diags)
+	if !found {
+		return nil, fmt.Errorf("database %q was not visible during bounded reconciliation", name)
+	}
+	if !converged {
+		return nil, fmt.Errorf("database %q did not converge to the planned options during bounded reconciliation", name)
+	}
+
+	return database, nil
+}
+
+func databaseMatchesOptions(database *client.Database, name string, options map[string]string, exact bool) bool {
+	if database == nil || database.Name != name || exact && len(database.Options) != len(options) {
+		return false
+	}
+	for key, value := range options {
+		if database.Options[key] != value {
+			return false
+		}
+	}
+
+	return true
 }
 
 func setDatabaseResourceModel(ctx context.Context, model *databaseResourceModel, database *client.Database, diags *diag.Diagnostics) {

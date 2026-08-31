@@ -25,17 +25,16 @@ Catalog. It follows the provider shape established by
 but talks directly to Paimon's language-neutral REST Catalog API instead of
 embedding a JVM client.
 
-> This repository is an initial implementation. The `apache/paimon` Terraform
-> Registry address becomes installable after the first provider release is
-> published and registered.
+The provider is published from signed Apache release candidates. See the
+[release guide](docs/releasing.md) for the source-vote and Registry workflow.
 
 ## Supported objects
 
 Resources:
 
 - `paimon_database` creates, reads, updates, imports, and drops databases.
-- `paimon_table` creates, reads, imports, updates options/comments, and drops
-  managed tables.
+- `paimon_table` creates, reads, imports, evolves supported table fields,
+  updates options/comments, and drops managed tables.
 - `paimon_permission` grants, reads, imports, replaces mutable assignment
   content, and revokes direct catalog permissions.
 - `paimon_row_filter` manages one principal's row filter on a table.
