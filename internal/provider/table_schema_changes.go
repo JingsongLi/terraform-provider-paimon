@@ -249,6 +249,7 @@ func schemaChangeDataType(field client.Field, existing []client.Field, excludeNe
 			used = append(used, nestedID)
 		}
 	}
+
 	return client.SchemaChangeDataType{Type: field.Type, NestedFieldIDs: field.NestedFieldIDs, UsedFieldIDs: used}
 }
 

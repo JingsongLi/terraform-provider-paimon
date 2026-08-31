@@ -208,6 +208,7 @@ func (c *acceptanceCatalog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/catalog/databases/analytics" && r.Method == http.MethodGet:
 		if c.database == nil {
 			http.NotFound(w, r)
+
 			return
 		}
 		writeAcceptanceJSON(w, c.database)
@@ -240,6 +241,7 @@ func (c *acceptanceCatalog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/catalog/databases/analytics/tables/events" && r.Method == http.MethodGet:
 		if c.table == nil {
 			http.NotFound(w, r)
+
 			return
 		}
 		writeAcceptanceJSON(w, c.table)
@@ -321,6 +323,7 @@ func moveAcceptanceField(fields []client.Field, name, moveType, reference string
 	for index := range fields {
 		if fields[index].Name == name {
 			from = index
+
 			break
 		}
 	}
@@ -335,6 +338,7 @@ func moveAcceptanceField(fields []client.Field, name, moveType, reference string
 		for index := range fields {
 			if fields[index].Name == reference {
 				to = index + 1
+
 				break
 			}
 		}

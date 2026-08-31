@@ -235,6 +235,7 @@ func decodeDataTypeJSON(data []byte, parentPath string, nestedFieldIDs map[strin
 	if notNull {
 		sqlType += " NOT NULL"
 	}
+
 	return DataType(sqlType), nestedFieldIDs, nil
 }
 
