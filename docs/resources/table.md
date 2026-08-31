@@ -62,10 +62,12 @@ canonical Paimon SQL type strings such as `INT`, `BIGINT`, `STRING`,
 Supported top-level field additions, drops, renames, atomic type/nullability
 changes, comments, defaults, and position changes use Paimon's in-place
 `SchemaChange` API. Stable field IDs distinguish a rename from a drop plus add.
-Rename cycles require an intermediate name. Changing an existing composite
-`ROW`, `ARRAY`, `MAP`, `MULTISET`, or `VECTOR` shape replaces the table because
-a whole-type update cannot safely preserve its nested IDs. `database`, `name`,
-`partition_keys`, and `primary_keys` also remain replacement attributes.
+Rename cycles require an intermediate name. Adding a non-nullable field,
+changing the type of a retained partition/primary-key field, or changing an
+existing composite `ROW`, `ARRAY`, `MAP`, `MULTISET`, or `VECTOR` shape replaces
+the table because Paimon's schema-evolution API cannot safely apply those
+changes in place. `database`, `name`, `partition_keys`, and `primary_keys` also
+remain replacement attributes.
 Configure keys with `primary_keys` and `partition_keys`; the
 normalized Paimon options `primary-key` and `partition` are rejected in
 `options` because the server removes them from its options map.

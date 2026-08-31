@@ -111,12 +111,17 @@ func (r *tableResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanR
 	}
 
 	stabilizePlannedFieldIdentities(configuredFields, stateFields, plannedFields)
+	keyFields := append(stringListFromValue(ctx, state.PartitionKeys, &resp.Diagnostics), stringListFromValue(ctx, state.PrimaryKeys, &resp.Diagnostics)...)
+	keyFields = append(keyFields, stringListFromValue(ctx, plan.PartitionKeys, &resp.Diagnostics)...)
+	keyFields = append(keyFields, stringListFromValue(ctx, plan.PrimaryKeys, &resp.Diagnostics)...)
 	plan.Fields = fieldsValueFromModels(ctx, plannedFields, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	resp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)
-	if compositeFieldTypesRequireReplace(stateFields, plannedFields) {
+	if compositeFieldTypesRequireReplace(stateFields, plannedFields) ||
+		keyFieldTypesRequireReplace(stateFields, plannedFields, keyFields) ||
+		newNonNullableFieldsRequireReplace(stateFields, plannedFields) {
 		resp.RequiresReplace = append(resp.RequiresReplace, path.Root("fields"))
 	}
 }
@@ -242,6 +247,7 @@ func (r *tableResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	}
 	before := beforeSchema.Options
 	after := afterSchema.Options
+	serverOptions := mapFromValue(ctx, state.ServerOptions, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -253,7 +259,12 @@ func (r *tableResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	}
 	sort.Strings(updateKeys)
 
-	changes, err := tableFieldSchemaChanges(beforeSchema.Fields, afterSchema.Fields)
+	addBeforePartitionValue, serverReportedOption := serverOptions["add-column-before-partition"]
+	if !serverReportedOption {
+		addBeforePartitionValue = before["add-column-before-partition"]
+	}
+	addBeforePartition := strings.EqualFold(strings.TrimSpace(addBeforePartitionValue), "true")
+	changes, err := tableFieldSchemaChanges(beforeSchema.Fields, afterSchema.Fields, addBeforePartition, beforeSchema.PartitionKeys)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to plan Paimon table schema changes", err.Error())
 

@@ -41,7 +41,7 @@ func TestTableFieldSchemaChanges(t *testing.T) {
 		{ID: 3, Name: "added", Type: "ROW<value STRING>", NestedFieldIDs: map[string]int{"/fields/value": 4}},
 	}
 
-	changes, err := tableFieldSchemaChanges(before, after)
+	changes, err := tableFieldSchemaChanges(before, after, false, nil)
 	require.NoError(t, err)
 	actions := make([]string, 0, len(changes))
 	for _, change := range changes {
@@ -118,7 +118,7 @@ func TestNewFieldDoesNotReuseDroppedFieldID(t *testing.T) {
 
 	require.NoError(t, assignTemporaryIDsToNewFields(before, planned, after))
 	assert.Equal(t, 2, after[1].ID)
-	changes, err := tableFieldSchemaChanges(before, after)
+	changes, err := tableFieldSchemaChanges(before, after, false, nil)
 	require.NoError(t, err)
 	require.Len(t, changes, 2)
 	assert.Equal(t, "dropColumn", changes[0]["action"])
@@ -131,6 +131,8 @@ func TestTableFieldSchemaChangesOrdersRenameChain(t *testing.T) {
 	changes, err := tableFieldSchemaChanges(
 		[]client.Field{{ID: 0, Name: "alpha", Type: "STRING"}, {ID: 1, Name: "beta", Type: "STRING"}},
 		[]client.Field{{ID: 0, Name: "beta", Type: "STRING"}, {ID: 1, Name: "gamma", Type: "STRING"}},
+		false,
+		nil,
 	)
 	require.NoError(t, err)
 	require.Len(t, changes, 2)
@@ -144,6 +146,8 @@ func TestTableFieldSchemaChangesRejectsRenameCycle(t *testing.T) {
 	_, err := tableFieldSchemaChanges(
 		[]client.Field{{ID: 0, Name: "left", Type: "STRING"}, {ID: 1, Name: "right", Type: "STRING"}},
 		[]client.Field{{ID: 0, Name: "right", Type: "STRING"}, {ID: 1, Name: "left", Type: "STRING"}},
+		false,
+		nil,
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "intermediate name")
@@ -203,4 +207,56 @@ func TestCompositeFieldTypeReplacementUsesStableIDs(t *testing.T) {
 	after[0].Type = types.StringValue("STRING")
 	before[1].Type = types.StringValue("INT")
 	assert.False(t, compositeFieldTypesRequireReplace(before, after), "atomic casts use SchemaChange")
+}
+
+func TestKeyFieldTypeChangeRequiresReplacement(t *testing.T) {
+	before := []tableFieldModel{
+		tableFieldForTest("id", types.Int64Value(0)),
+		tableFieldForTest("payload", types.Int64Value(1)),
+	}
+	before[0].Type = types.StringValue("BIGINT")
+	after := append([]tableFieldModel(nil), before...)
+	after[0].Type = types.StringValue("INT")
+
+	assert.True(t, keyFieldTypesRequireReplace(before, after, []string{"id"}))
+	assert.False(t, keyFieldTypesRequireReplace(before, after, []string{"payload"}))
+}
+
+func TestNewNonNullableFieldRequiresReplacement(t *testing.T) {
+	before := []tableFieldModel{tableFieldForTest("id", types.Int64Value(0))}
+	added := tableFieldForTest("required_value", types.Int64Unknown())
+	added.Nullable = types.BoolValue(false)
+	after := []tableFieldModel{before[0], added}
+
+	assert.True(t, newNonNullableFieldsRequireReplace(before, after))
+	after[1].Nullable = types.BoolValue(true)
+	assert.False(t, newNonNullableFieldsRequireReplace(before, after))
+	after[1].Nullable = types.BoolUnknown()
+	after[1].Type = types.StringValue("STRING NOT NULL")
+	assert.True(t, newNonNullableFieldsRequireReplace(before, after))
+}
+
+func TestTableFieldSchemaChangesAccountsForAddBeforePartition(t *testing.T) {
+	before := []client.Field{
+		{ID: 0, Name: "id", Type: "BIGINT"},
+		{ID: 1, Name: "day", Type: "DATE"},
+	}
+	after := append(append([]client.Field(nil), before...), client.Field{ID: 2, Name: "payload", Type: "STRING"})
+
+	changes, err := tableFieldSchemaChanges(before, after, true, []string{"day"})
+	require.NoError(t, err)
+	require.Len(t, changes, 2)
+	assert.Equal(t, "addColumn", changes[0]["action"])
+	assert.Equal(t, client.SchemaChange{
+		"action": "updateColumnPosition",
+		"move": client.SchemaChange{
+			"fieldName":          "payload",
+			"type":               "AFTER",
+			"referenceFieldName": "day",
+		},
+	}, changes[1])
+
+	changes, err = tableFieldSchemaChanges(before, after, false, []string{"day"})
+	require.NoError(t, err)
+	require.Len(t, changes, 1)
 }

@@ -72,7 +72,7 @@ func assignTemporaryIDsToNewFields(before []client.Field, planned []tableFieldMo
 	return nil
 }
 
-func tableFieldSchemaChanges(before, after []client.Field) ([]client.SchemaChange, error) {
+func tableFieldSchemaChanges(before, after []client.Field, addBeforePartition bool, partitionKeys []string) ([]client.SchemaChange, error) {
 	beforeByID, err := fieldsByID(before)
 	if err != nil {
 		return nil, err
@@ -190,26 +190,56 @@ func tableFieldSchemaChanges(before, after []client.Field) ([]client.SchemaChang
 			currentOrder = append(currentOrder, planned.Name)
 		}
 	}
+	partitionKeySet := make(map[string]struct{}, len(partitionKeys))
+	for _, name := range partitionKeys {
+		partitionKeySet[name] = struct{}{}
+	}
 	for _, planned := range after {
 		if _, exists := beforeByID[planned.ID]; !exists {
-			currentOrder = append(currentOrder, planned.Name)
+			insertAt := len(currentOrder)
+			if addBeforePartition {
+				for index, name := range currentOrder {
+					if _, partitionKey := partitionKeySet[name]; partitionKey {
+						insertAt = index
+
+						break
+					}
+				}
+			}
+			currentOrder = insertString(currentOrder, insertAt, planned.Name)
 		}
+	}
+	for index, planned := range after {
+		if _, retained := beforeByID[planned.ID]; retained {
+			continue
+		}
+		currentIndex := slices.Index(currentOrder, planned.Name)
+		if currentIndex == index {
+			continue
+		}
+		changes = append(changes, columnPositionChange(after, index))
+		currentOrder = moveString(currentOrder, currentIndex, index)
 	}
 	for index, planned := range after {
 		currentIndex := slices.Index(currentOrder, planned.Name)
 		if currentIndex == index {
 			continue
 		}
-		move := client.SchemaChange{"fieldName": planned.Name, "type": "FIRST"}
-		if index > 0 {
-			move["type"] = "AFTER"
-			move["referenceFieldName"] = after[index-1].Name
-		}
-		changes = append(changes, client.SchemaChange{"action": "updateColumnPosition", "move": move})
+		changes = append(changes, columnPositionChange(after, index))
 		currentOrder = moveString(currentOrder, currentIndex, index)
 	}
 
 	return changes, nil
+}
+
+func columnPositionChange(fields []client.Field, index int) client.SchemaChange {
+	move := client.SchemaChange{"fieldName": fields[index].Name, "type": "FIRST"}
+	if index > 0 {
+		move["type"] = "AFTER"
+		move["referenceFieldName"] = fields[index-1].Name
+	}
+
+	return client.SchemaChange{"action": "updateColumnPosition", "move": move}
 }
 
 func fieldsByID(fields []client.Field) (map[int]client.Field, error) {
@@ -263,6 +293,14 @@ func moveString(values []string, from, to int) []string {
 	values = append(values, "")
 	copy(values[to+1:], values[to:])
 	values[to] = value
+
+	return values
+}
+
+func insertString(values []string, index int, value string) []string {
+	values = append(values, "")
+	copy(values[index+1:], values[index:])
+	values[index] = value
 
 	return values
 }

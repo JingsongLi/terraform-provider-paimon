@@ -151,6 +151,64 @@ func compositeFieldTypesRequireReplace(before, after []tableFieldModel) bool {
 	return false
 }
 
+func keyFieldTypesRequireReplace(before, after []tableFieldModel, keyFields []string) bool {
+	keys := make(map[string]struct{}, len(keyFields))
+	for _, name := range keyFields {
+		keys[name] = struct{}{}
+	}
+	beforeByID := make(map[int64]tableFieldModel, len(before))
+	for _, field := range before {
+		if !field.ID.IsNull() && !field.ID.IsUnknown() {
+			beforeByID[field.ID.ValueInt64()] = field
+		}
+	}
+	for _, planned := range after {
+		if planned.ID.IsNull() || planned.ID.IsUnknown() || planned.Type.IsNull() || planned.Type.IsUnknown() {
+			continue
+		}
+		previous, exists := beforeByID[planned.ID.ValueInt64()]
+		if !exists || previous.Type.IsNull() || previous.Type.IsUnknown() {
+			continue
+		}
+		_, previousIsKey := keys[previous.Name.ValueString()]
+		_, plannedIsKey := keys[planned.Name.ValueString()]
+		if (previousIsKey || plannedIsKey) && !client.EquivalentDataTypes(client.DataType(previous.Type.ValueString()), client.DataType(planned.Type.ValueString())) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func newNonNullableFieldsRequireReplace(before, after []tableFieldModel) bool {
+	beforeByID := make(map[int64]struct{}, len(before))
+	for _, field := range before {
+		if !field.ID.IsNull() && !field.ID.IsUnknown() {
+			beforeByID[field.ID.ValueInt64()] = struct{}{}
+		}
+	}
+	for _, field := range after {
+		retained := false
+		if !field.ID.IsNull() && !field.ID.IsUnknown() {
+			_, retained = beforeByID[field.ID.ValueInt64()]
+		}
+		if retained {
+			continue
+		}
+		if !field.Nullable.IsNull() && !field.Nullable.IsUnknown() && !field.Nullable.ValueBool() {
+			return true
+		}
+		if !field.Type.IsNull() && !field.Type.IsUnknown() {
+			_, nullable := splitFieldType(client.DataType(field.Type.ValueString()))
+			if !nullable {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func tableFieldResourceAttributes() map[string]rschema.Attribute {
 	return map[string]rschema.Attribute{
 		"id": rschema.Int64Attribute{

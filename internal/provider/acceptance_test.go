@@ -110,6 +110,42 @@ func TestAccDatabaseAndTableLifecycle(t *testing.T) {
 	assert.Equal(t, 1, catalog.tableCreates, "field additions and reordering must update the table in place")
 }
 
+func TestAccTableReplacementBoundaries(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("set TF_ACC=1 to run Terraform acceptance tests")
+	}
+	catalog := &acceptanceCatalog{}
+	server := httptest.NewServer(catalog)
+	defer server.Close()
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccReplacementConfig(server.URL, "BIGINT", false),
+			},
+			{
+				Config: testAccReplacementConfig(server.URL, "INT", false),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("paimon_table.events", plancheck.ResourceActionReplace),
+					},
+				},
+			},
+			{
+				Config: testAccReplacementConfig(server.URL, "INT", true),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("paimon_table.events", plancheck.ResourceActionReplace),
+					},
+				},
+				Check: resource.TestCheckResourceAttr("paimon_table.events", "fields.2.name", "required_value"),
+			},
+		},
+	})
+	assert.Equal(t, 3, catalog.tableCreates, "key type changes and non-nullable additions must replace the table")
+}
+
 func testAccConfig(uri string, updated, reordered, replaced bool) string {
 	owner := "data"
 	comment := "initial"
@@ -177,6 +213,46 @@ resource "paimon_table" "events" {
   comment      = %q
 }
 `, uri, owner, fields, comment)
+}
+
+func testAccReplacementConfig(uri, keyType string, addRequired bool) string {
+	requiredField := ""
+	if addRequired {
+		requiredField = `,
+    {
+      name     = "required_value"
+      type     = "STRING"
+      nullable = false
+    }`
+	}
+
+	return fmt.Sprintf(`
+provider "paimon" {
+  uri = %q
+}
+
+resource "paimon_database" "analytics" {
+  name = "analytics"
+}
+
+resource "paimon_table" "events" {
+  database = paimon_database.analytics.name
+  name     = "events"
+  fields = [
+    {
+      name     = "id"
+      type     = %q
+      nullable = false
+    },
+    {
+      name     = "event_time"
+      type     = "TIMESTAMP(3)"
+      nullable = true
+    }%s
+  ]
+  primary_keys = ["id"]
+}
+`, uri, keyType, requiredField)
 }
 
 type acceptanceCatalog struct {
