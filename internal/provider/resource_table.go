@@ -77,7 +77,6 @@ func (r *tableResource) Metadata(_ context.Context, req resource.MetadataRequest
 
 func (r *tableResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Version:     1,
 		Description: "Manages a table in a Paimon REST Catalog. Dropping this resource calls the catalog's managed-table drop API and can remove table data.",
 		Attributes:  tableResourceAttributes(),
 	}

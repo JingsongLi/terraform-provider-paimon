@@ -17,7 +17,7 @@
   under the License.
 -->
 
-# API contract and migration
+# API contract
 
 The core Terraform API consists of `paimon_database`, `paimon_table`, and their
 single-object data sources. Keep the ordered `fields` list, string-valued
@@ -54,30 +54,6 @@ behaves identically. Pin the provider and server revisions, run the real catalog
 suite, and validate query enforcement before accepting a deployment. Content
 changes to filters and masks remain non-atomic and require a maintenance window
 with `allow_non_atomic_update = true`.
-
-## Migrating pre-stable HCL
-
-| Previous configuration/reference | Current configuration/reference |
-| --- | --- |
-| `primary_keys = ["id", "tenant"]` | `options = { "primary-key" = "id,tenant" }` (merge into existing options) |
-| `.catalog_id` on resources or data sources | `.server_id` |
-| `allow_destructive_changes = true` | `allow_replacement = true` |
-
-Resource schema version 1 automatically renames version-0 state attributes
-`catalog_id` and `allow_destructive_changes`. Field IDs, normalized keys, and
-managed options are preserved; no remote mutation happens during migration.
-HCL files and output references must still be updated. Data sources are read
-again using the new schema. State cannot tell whether old optional/computed
-primary keys were explicitly configured or only observed during import, so the
-migration does not silently add managed options. Move any intended key
-configuration into `options` yourself; adopting matching keys causes no ALTER
-or replacement.
-
-Before upgrading, retain a state backup and inspect the new plan. An omitted
-unmanaged primary key remains inherited. Once `options["primary-key"]` is
-managed, removing it requests no primary keys and is protected by the default
-replacement guard. Do not approve a replacement merely to complete migration.
-The HCL changes above are intentionally completed before a stable API release.
 
 See [production validation](production-readiness.md) for CLI, deployed-service,
 query-engine and signed Registry checks that source review cannot establish.

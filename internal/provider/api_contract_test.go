@@ -31,14 +31,11 @@ import (
 	"time"
 
 	"github.com/apache/terraform-provider-paimon/internal/client"
-	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
-	"github.com/hashicorp/terraform-plugin-framework/path"
 	frameworkprovider "github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	accresource "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/stretchr/testify/require"
@@ -234,67 +231,6 @@ resource "paimon_table" "events" {
 	}})
 	require.Equal(t, 2, catalog.tableCreates)
 	require.Zero(t, catalog.tableAlters, "primary-key must never be changed through ALTER options")
-}
-
-func TestVersionZeroStateUpgradePreservesValues(t *testing.T) {
-	ctx := context.Background()
-	for _, table := range []bool{false, true} {
-		t.Run(strconv.FormatBool(table), func(t *testing.T) {
-			var res resource.Resource
-			var model any
-			if table {
-				res = &tableResource{}
-				model = &tableResourceModel{ID: types.StringValue("database=db&table=tbl"), ServerID: types.StringValue("remote-1"), Fields: types.ListNull(types.ObjectType{AttrTypes: tableFieldAttrTypes()}), PartitionKeys: types.ListNull(types.StringType), PrimaryKeys: types.ListValueMust(types.StringType, []attr.Value{types.StringValue("id")}), Options: types.MapNull(types.StringType), ServerOptions: types.MapValueMust(types.StringType, map[string]attr.Value{"keep": types.StringValue("yes")}), AllowReplacement: types.BoolValue(true)}
-			} else {
-				res = &databaseResource{}
-				model = &databaseResourceModel{ID: types.StringValue("db"), ServerID: types.StringValue("remote-1"), Options: types.MapValueMust(types.StringType, map[string]attr.Value{"owner": types.StringValue("test")}), ServerOptions: types.MapNull(types.StringType)}
-			}
-			var sr resource.SchemaResponse
-			res.Schema(ctx, resource.SchemaRequest{}, &sr)
-			require.EqualValues(t, 1, sr.Schema.Version)
-			current := tfsdk.State{Schema: sr.Schema}
-			require.False(t, current.Set(ctx, model).HasError())
-			values := make(map[string]any)
-			for name := range sr.Schema.Attributes {
-				values[name] = nil
-			}
-			values["server_id"] = "remote-1"
-			if table {
-				values["id"] = "database=db&table=tbl"
-				values["primary_keys"] = []string{"id"}
-				values["allow_replacement"] = true
-				values["server_options"] = map[string]string{"keep": "yes"}
-			} else {
-				values["id"] = "db"
-				values["options"] = map[string]string{"owner": "test"}
-			}
-			encoded, err := json.Marshal(values)
-			require.NoError(t, err)
-			legacy := strings.ReplaceAll(strings.ReplaceAll(string(encoded), `"server_id":`, `"catalog_id":`), `"allow_replacement":`, `"allow_destructive_changes":`)
-			response := resource.UpgradeStateResponse{State: tfsdk.State{Schema: sr.Schema}}
-			upgrader := res.(resource.ResourceWithUpgradeState).UpgradeState(ctx)[0]
-			upgrader.StateUpgrader(ctx, resource.UpgradeStateRequest{RawState: &tfprotov6.RawState{JSON: []byte(legacy)}}, &response)
-			require.False(t, response.Diagnostics.HasError(), response.Diagnostics)
-			require.NotNil(t, response.DynamicValue)
-			upgraded, err := response.DynamicValue.Unmarshal(current.Raw.Type())
-			require.NoError(t, err)
-			require.True(t, current.Raw.Equal(upgraded), "all keys, defaults, managed options and metadata must survive renaming")
-			if table {
-				delete(values, "allow_replacement")
-				encoded, err = json.Marshal(values)
-				require.NoError(t, err)
-				legacy = strings.ReplaceAll(string(encoded), `"server_id":`, `"catalog_id":`)
-				response = resource.UpgradeStateResponse{State: tfsdk.State{Schema: sr.Schema}}
-				upgrader.StateUpgrader(ctx, resource.UpgradeStateRequest{RawState: &tfprotov6.RawState{JSON: []byte(legacy)}}, &response)
-				require.False(t, response.Diagnostics.HasError(), response.Diagnostics)
-				require.NotNil(t, response.DynamicValue)
-				upgraded, err = response.DynamicValue.Unmarshal(current.Raw.Type())
-				require.NoError(t, err)
-				require.False(t, current.SetAttribute(ctx, path.Root("allow_replacement"), false).HasError())
-				require.True(t, current.Raw.Equal(upgraded), "snapshots predating the guard must default to protected replacement")
-			}
-		})
-	}
 }
 
 func TestAccPolicyJavaCanonicalization(t *testing.T) {

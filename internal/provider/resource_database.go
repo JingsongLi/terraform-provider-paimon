@@ -64,7 +64,6 @@ func (r *databaseResource) Metadata(_ context.Context, req resource.MetadataRequ
 
 func (r *databaseResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Version:     1,
 		Description: "Manages a database in a Paimon REST Catalog.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{

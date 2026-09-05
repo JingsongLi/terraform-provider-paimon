@@ -117,5 +117,5 @@ and authorization enforcement are server responsibilities. See the
 See the [production validation guide](production-readiness.md) for integration
 coverage, compatibility evidence, and rollout checks.
 
-See the [API contract and migration guide](api-compatibility.md) for the stable
-core shape, experimental management boundary, and pre-stable HCL changes.
+See the [API contract](api-contract.md) for the core resource model and
+experimental management boundary.

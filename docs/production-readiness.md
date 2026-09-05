@@ -87,7 +87,7 @@ and masked columns, and verify revocation denies reads. Retain these results
 with the integration job; do not use metadata equality as evidence of query
 enforcement.
 
-## Upgrade and recovery
+## Operations and recovery
 
 - Import existing objects before managing them. In particular, a rejected
   policy create does not establish ownership of a pre-existing policy.

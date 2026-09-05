@@ -150,6 +150,6 @@ make test-acceptance
 See [`docs/index.md`](docs/index.md) for the full provider configuration and
 resource notes.
 
-See the [API contract and migration guide](docs/api-compatibility.md) before
-upgrading a pre-stable configuration. Primary keys use `options["primary-key"]`;
+See the [API contract](docs/api-contract.md) for the current resource model and
+experimental management boundary. Primary keys use `options["primary-key"]`;
 `primary_keys` is a computed output.

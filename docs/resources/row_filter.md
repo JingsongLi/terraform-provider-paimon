@@ -87,5 +87,5 @@ and one-child AND/OR predicates simplify to their child. Equivalent configured
 JSON is retained in state. Changes to field names, functions, literal values,
 cast target types, or unknown AST members remain meaningful differences. The
 Catalog must permit reading the protected table schema for this comparison.
-See the [API compatibility guide](../api-compatibility.md) for the exact Java
+See the [API contract](../api-contract.md) for the exact Java
 reference revision and experimental compatibility boundary.
