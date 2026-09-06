@@ -306,6 +306,70 @@ resource "paimon_table" "events" {
 	}})
 }
 
+func TestAccTableWithDeferredPartitionKeyElements(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("set TF_ACC=1 to run Terraform acceptance tests")
+	}
+	catalog := &acceptanceCatalog{database: &client.Database{Name: "analytics", Options: map[string]string{}}}
+	server := httptest.NewServer(catalog)
+	defer server.Close()
+	config := func(revision int, prefix string, allowed bool) string {
+		return fmt.Sprintf(`
+provider "paimon" { uri = %q }
+resource "terraform_data" "partition" {
+ input = { name = "tenant", revision = %d }
+}
+resource "paimon_table" "events" {
+ database = "analytics"
+ name = "events"
+ fields = [{name="tenant",type="STRING"},{name="region",type="STRING"}]
+ partition_keys = [%s terraform_data.partition.output.name]
+ allow_replacement = %t
+}
+`, server.URL, revision, prefix, allowed)
+	}
+	initial := config(1, "", false)
+	nullKey := strings.Replace(config(2, "", true), "terraform_data.partition.output.name", "null", 1)
+	// Changing the dependency makes its output unknown again. Adding a second
+	// partition key requires replacement, with both known and unknown elements.
+	updated := config(2, `"region",`, true)
+	accresource.Test(t, accresource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []accresource.TestStep{
+			{Config: nullKey, PlanOnly: true, ExpectError: regexp.MustCompile("Null List Value")},
+			{
+				Config: initial,
+				Check: accresource.ComposeTestCheckFunc(
+					accresource.TestCheckResourceAttr("paimon_table.events", "partition_keys.#", "1"),
+					accresource.TestCheckResourceAttr("paimon_table.events", "partition_keys.0", "tenant"),
+					accresource.TestCheckResourceAttr("paimon_table.events", "fields.0.nullable", "true"),
+				),
+			},
+			{Config: initial, PlanOnly: true},
+			{Config: nullKey, PlanOnly: true, ExpectError: regexp.MustCompile("Null List Value")},
+			{
+				Config:      config(2, `"region",`, false),
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile("Destructive table change is disabled"),
+			},
+			{
+				Config: updated,
+				ConfigPlanChecks: accresource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction("paimon_table.events", plancheck.ResourceActionDestroyBeforeCreate),
+				}},
+				Check: accresource.ComposeTestCheckFunc(
+					accresource.TestCheckResourceAttr("paimon_table.events", "partition_keys.#", "2"),
+					accresource.TestCheckResourceAttr("paimon_table.events", "partition_keys.0", "region"),
+					accresource.TestCheckResourceAttr("paimon_table.events", "partition_keys.1", "tenant"),
+				),
+			},
+			{Config: updated, PlanOnly: true},
+		},
+	})
+	require.Equal(t, 2, catalog.tableCreates)
+	require.Zero(t, catalog.tableAlters, "partition changes must replace the table, never alter its schema in place")
+}
+
 func TestFieldDefaultConstantsAndRemoval(t *testing.T) {
 	ctx := context.Background()
 	for _, test := range []struct{ kind, value string }{{"BIGINT", "42"}, {"BOOLEAN", "true"}, {"DATE", "2026-01-02"}, {"STRING", ""}, {"STRING", "NULL"}, {"STRING", "1 + 2"}, {"STRING", "CURRENT_TIMESTAMP"}} {

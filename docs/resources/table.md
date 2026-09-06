@@ -181,6 +181,7 @@ option's key from the map rather than assigning `null` to its value.
 The `fields` list is always authoritative. Import does not make omitted field
 entries unmanaged. Include every field you intend to retain. Each partition or
 primary-key name must refer to a field, and key lists must not contain duplicates.
+`partition_keys` elements may be unknown during planning, but must not be `null`.
 A refresh that finds the table missing removes it from Terraform state; a
 subsequent plan can recreate it.
 

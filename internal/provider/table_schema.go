@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/apache/terraform-provider-paimon/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	dschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -94,6 +95,7 @@ func tableResourceAttributes() map[string]rschema.Attribute {
 			Optional:      true,
 			Computed:      true,
 			ElementType:   types.StringType,
+			Validators:    []validator.List{listvalidator.NoNullValues()},
 			PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplaceIfConfigured()},
 		},
 		"primary_keys": rschema.ListAttribute{

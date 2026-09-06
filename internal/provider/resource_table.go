@@ -124,17 +124,17 @@ func (r *tableResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanR
 			validateAddedFieldIDs(stateFields, configuredFields, &resp.Diagnostics)
 		}
 		stabilizeFieldNullability(ctx, configuredFields, stateFields, plannedFields, plan, state, &resp.Diagnostics)
-		keyFields := append(stringListFromValue(ctx, state.PartitionKeys, &resp.Diagnostics), stringListFromValue(ctx, state.PrimaryKeys, &resp.Diagnostics)...)
-		keyFields = append(keyFields, stringListFromValue(ctx, plan.PartitionKeys, &resp.Diagnostics)...)
-		keyFields = append(keyFields, stringListFromValue(ctx, plan.PrimaryKeys, &resp.Diagnostics)...)
 		plan.Fields = fieldsValueFromModels(ctx, plannedFields, &resp.Diagnostics)
 		if resp.Diagnostics.HasError() {
 			return
 		}
-		if !req.State.Raw.IsNull() && (compositeFieldTypesRequireReplace(stateFields, plannedFields) ||
-			keyFieldTypesRequireReplace(stateFields, plannedFields, keyFields) ||
-			newNonNullableFieldsRequireReplace(stateFields, plannedFields)) {
-			replacementPaths = append(replacementPaths, path.Root("fields"))
+		if !req.State.Raw.IsNull() {
+			keyFields := knownTableKeyNames(state.PartitionKeys, state.PrimaryKeys, plan.PartitionKeys, plan.PrimaryKeys)
+			if compositeFieldTypesRequireReplace(stateFields, plannedFields) ||
+				keyFieldTypesRequireReplace(stateFields, plannedFields, keyFields) ||
+				newNonNullableFieldsRequireReplace(stateFields, plannedFields) {
+				replacementPaths = append(replacementPaths, path.Root("fields"))
+			}
 		}
 
 	}

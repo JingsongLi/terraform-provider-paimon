@@ -188,3 +188,19 @@ func tableFieldsInspectable(fields types.List) bool {
 
 	return true
 }
+
+// Replacement checks can inspect resolved key names while other list elements
+// remain unknown. Unknown names are checked when Terraform resolves the plan.
+func knownTableKeyNames(keyLists ...types.List) []string {
+	var names []string
+	for _, keys := range keyLists {
+		for _, element := range keys.Elements() {
+			key := element.(types.String)
+			if !key.IsNull() && !key.IsUnknown() {
+				names = append(names, key.ValueString())
+			}
+		}
+	}
+
+	return names
+}
