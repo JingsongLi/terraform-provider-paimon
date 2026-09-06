@@ -275,7 +275,7 @@ func tableFieldDataSourceAttributes() map[string]dschema.Attribute {
 		"type":          dschema.StringAttribute{Description: "Canonical Paimon SQL data type.", Computed: true},
 		"nullable":      dschema.BoolAttribute{Description: "Whether the field accepts null values.", Computed: true},
 		"description":   dschema.StringAttribute{Description: "Field description.", Computed: true},
-		"default_value": dschema.StringAttribute{Description: "Constant default value as a string, converted to the field type by Paimon; SQL expressions are not evaluated. Null removes the default; an empty string is a distinct value.", Computed: true},
+		"default_value": dschema.StringAttribute{Description: "Constant default represented as a string. Null means no default; an empty string is a distinct constant.", Computed: true},
 		"nested_field_ids": dschema.MapAttribute{
 			Description: "Stable nested ROW field IDs keyed by escaped field path.",
 			Computed:    true,

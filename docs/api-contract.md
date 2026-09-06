@@ -28,6 +28,31 @@ object; `server_id` is the database/table UUID returned by the server, not a
 Catalog identifier. `options` manages declared keys and preserves unmanaged
 keys; `server_options` exposes the raw server map.
 
+## Terraform field references
+
+The following pages cover all registered Terraform inputs and outputs, including
+nested field attributes, types, required/optional/computed modes, sensitive
+flags, defaults, and lifecycle behavior:
+
+- [Provider configuration](index.md)
+- [Database resource](resources/database.md) and [data source](data-sources/database.md)
+- [Table resource](resources/table.md) and [data source](data-sources/table.md)
+- [Permission resource](resources/permission.md)
+- [Row-filter resource](resources/row_filter.md)
+- [Column-mask resource](resources/column_mask.md)
+
+These references describe the provider's Terraform API. Arbitrary Paimon option
+names and the experimental Predicate/Transform JSON vocabulary remain server
+contracts; the provider documents the options it handles specially and delegates
+other validation to the deployed server.
+
+`make check-docs` compares these pages with the schema served through the
+Terraform protocol. It fails for missing or stale field entries, incorrect
+types, modes, or sensitive flags, and empty field descriptions. It also covers
+newly registered resources and data sources. The check runs in the normal Go
+test suite and `make check`; defaults, validators, and behavior descriptions
+must additionally be reviewed against the implementation.
+
 ## Reference contracts
 
 The review used these exact source revisions. They are source compatibility

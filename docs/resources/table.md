@@ -52,6 +52,53 @@ resource "paimon_table" "example" {
 }
 ```
 
+## Schema
+
+Required attributes must be configured. Optional attributes may be omitted or
+set to `null`; their behavior is described below. Optional + computed attributes
+can be configured or resolved by the provider. Computed attributes are read-only.
+`number` attributes and values of `map(number)` are integers.
+
+<!-- schema:begin -->
+
+| Attribute | Type | Mode | Sensitive | Meaning, default, and update behavior |
+| --- | --- | --- | --- | --- |
+| `database` | `string` | Required | No | Database containing the table. Changing it requires replacement and `allow_replacement = true`. |
+| `name` | `string` | Required | No | Table name. Changing it requires replacement and `allow_replacement = true`. |
+| `fields` | `list(object)` | Required | No | Ordered, complete list of top-level fields. Removing an entry requests a column drop. See the nested schema and supported evolution below. |
+| `partition_keys` | `list(string)` | Optional + computed | No | Ordered partition field names. Omitted/null means no partitions on creation and inherits existing keys on update/import. Explicit `[]` requests no partitions. Changing keys requires replacement. |
+| `options` | `map(string)` | Optional | No | String-valued Paimon options managed by Terraform, including `primary-key`. No managed keys initially when omitted/null. Removing managed keys deletes them; other server keys survive. Mutable changes update in place; immutable changes require replacement. `partition` is reserved. |
+| `comment` | `string` | Optional | No | Table comment. Omitted/null means no comment and clears a previous comment, including after import. `""` is an explicit empty string. Changes update in place. |
+| `allow_replacement` | `bool` | Optional + computed | No | Default: `false`. Set to `true` to permit required replacement, which can delete table data. Does not block explicit destroy or resource removal. |
+| `id` | `string` | Computed | No | Terraform/import identity in URL-query form, for example `database=analytics&table=events`, with names percent-encoded. |
+| `server_id` | `string` | Computed | No | Server-assigned table object identifier; distinct from Terraform `id` and the Catalog ID. |
+| `primary_keys` | `list(string)` | Computed | No | Normalized, ordered primary-key field names. Configure keys with `options["primary-key"]`, not this attribute. |
+| `server_options` | `map(string)` | Computed | No | Complete raw server option map. Normally excludes the `primary-key` option consumed by Java schema normalization; use `primary_keys` to read those keys. |
+| `schema_id` | `number` | Computed | No | Current schema version identifier returned by the server. |
+| `path` | `string` | Computed | No | Table storage path returned by the server. |
+| `is_external` | `bool` | Computed | No | Whether the server reports an external table. This is an output, not an external-table creation setting. |
+| `owner` | `string` | Computed | No | Owner metadata returned by the server; independent of a similarly named option. |
+| `created_at` | `number` | Computed | No | Creation timestamp in milliseconds since the Unix epoch. |
+| `created_by` | `string` | Computed | No | Principal that created the object, as reported by the server. |
+| `updated_at` | `number` | Computed | No | Last update timestamp in milliseconds since the Unix epoch. |
+| `updated_by` | `string` | Computed | No | Principal that last updated the object, as reported by the server. |
+
+### Nested `fields` attributes
+
+| Attribute | Type | Mode | Sensitive | Meaning, default, and update behavior |
+| --- | --- | --- | --- | --- |
+| `fields[].name` | `string` | Required | No | Unique top-level field name. Retain its ID when renaming an existing field. |
+| `fields[].type` | `string` | Required | No | Nonempty Paimon SQL type string, such as `BIGINT`, `STRING`, or `ROW<item STRING>`. A `NOT NULL` suffix must agree with `nullable = false`. |
+| `fields[].id` | `number` | Optional + computed | No | Stable, unique integer ID from `0` through `1073741822`. May be supplied on initial creation or to identify a retained field. Omit for a new field added to an existing table so Paimon assigns it. |
+| `fields[].nullable` | `bool` | Optional + computed | No | Omitted/null inherits a retained field’s nullability. New non-key fields default to `true` unless the type has `NOT NULL`; primary keys follow `primary-key.nullable`, default `false`. |
+| `fields[].description` | `string` | Optional | No | Field comment. Omitted/null clears an existing description, including after import. `""` is an explicit empty string. Updates in place. |
+| `fields[].default_value` | `string` | Optional | No | Constant string cast by Paimon to the field type, not a SQL expression. Omitted/null clears an existing default; `""` is a distinct constant. Updates in place when supported by the server. |
+| `fields[].nested_field_ids` | `map(number)` | Computed | No | Stable IDs of nested ROW fields keyed by escaped field paths. Read-only; retained across supported changes. In path components, `~0` encodes `~` and `~1` encodes `/`. |
+
+<!-- schema:end -->
+
+## Behavior
+
 Each field supports `id`, `name`, `type`, `nullable`, `description`, and
 `default_value`. `nested_field_ids` is a computed map that preserves the stable
 IDs of nested ROW fields. Top-level field IDs must be unique integers from 0
@@ -116,6 +163,66 @@ verification times out, the provider reports an error and retains the previous
 managed keys; refresh observes the eventual result and the next plan can retry
 any remaining change.
 
+### Omitted and null values
+
+Omission and HCL `null` have the same meaning for optional attributes, but that
+meaning depends on the attribute. Map entries must contain strings: remove an
+option's key from the map rather than assigning `null` to its value.
+
+| Input | New table | Existing or imported table |
+| --- | --- | --- |
+| `partition_keys` | No partition keys | Inherit existing keys; use `[]` to request removal |
+| `options` | No managed options | Preserve unmanaged keys and remove keys previously managed by this resource |
+| Omitted `primary-key` entry in `options` | No primary keys | Inherit unmanaged keys; removing a previously managed option requests no primary keys |
+| `comment`, `fields[].description`, `fields[].default_value` | Absent | Clear the previous value; these do not inherit imported values |
+| `fields[].id`, `fields[].nullable` | Resolve using the field rules above | Inherit the retained field's identity/nullability |
+| `allow_replacement` | `false` | `false`; opt in explicitly for each configuration that needs replacement |
+
+The `fields` list is always authoritative. Import does not make omitted field
+entries unmanaged. Include every field you intend to retain. Each partition or
+primary-key name must refer to a field, and key lists must not contain duplicates.
+A refresh that finds the table missing removes it from Terraform state; a
+subsequent plan can recreate it.
+
+### Immutable options
+
+The provider requires replacement when the effective value of any of these
+managed options changes or is removed:
+
+```
+aggregation.remove-record-on-delete
+blob-descriptor-field
+blob-field
+blob-view-field
+bucket-function.type
+bucket-key
+data-evolution.enabled
+data-file.path-directory
+dynamic-bucket.initial-buckets
+force-lookup
+index-file-in-data-file-dir
+merge-engine
+partial-update.remove-record-on-delete
+partial-update.remove-record-on-sequence-group
+pk-clustering-override
+primary-key
+primary-key.nullable
+row-tracking.enabled
+rowkind.field
+sequence.snapshot-ordering
+type
+video-frame-field
+```
+
+`partition` is also immutable in Paimon, but cannot be configured in `options`;
+use `partition_keys`. For `type`, omission has the effective default `table`,
+and comparisons ignore case. Other option names and values are passed through
+to the deployed server, which validates their support and constraints. This
+reference documents the provider's handling of options, not every Paimon engine
+option.
+
+### Destruction
+
 Dropping a managed table can delete its data. Use `prevent_destroy` where
 appropriate:
 
@@ -124,6 +231,8 @@ lifecycle {
   prevent_destroy = true
 }
 ```
+
+## Import
 
 Import with the unambiguous URL-query identity. The legacy `database.table`
 form remains accepted when names do not contain dots:

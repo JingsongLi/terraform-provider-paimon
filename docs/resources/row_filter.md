@@ -52,6 +52,28 @@ resource "paimon_row_filter" "analyst_region" {
 }
 ```
 
+## Schema
+
+Required attributes must be configured. Optional attributes may be omitted or
+set to `null`; their behavior is described below. Optional + computed attributes
+can be configured or resolved by the provider. Computed attributes are read-only.
+`number` attributes and values of `map(number)` are integers.
+
+<!-- schema:begin -->
+
+| Attribute | Type | Mode | Sensitive | Meaning, default, and update behavior |
+| --- | --- | --- | --- | --- |
+| `database` | `string` | Required | No | Nonblank database name. Changing it replaces the policy attachment. |
+| `table` | `string` | Required | No | Nonblank table name. The table must exist with `query-auth.enabled=true`. Changing it replaces the policy attachment. |
+| `principal` | `string` | Required | No | Existing server principal identifier. Must be nonblank and at most 128 UTF-16 code units. Changing it replaces the policy attachment. |
+| `predicate` | `string` | Required | No | Nonempty JSON serialization of one Paimon `Predicate`, at most 60 KiB in UTF-8. The server validates the AST. Meaningful changes require `allow_non_atomic_update = true` and use drop/create. |
+| `allow_non_atomic_update` | `bool` | Optional + computed | No | Default: `false`. Permits content updates by dropping and recreating the policy. Does not guard explicit deletion or identity replacement; see the maintenance requirements below. |
+| `id` | `string` | Computed | No | Percent-encoded URL-query identity containing database, table, principal. Use the same identity for import. |
+
+<!-- schema:end -->
+
+## Behavior
+
 `predicate` must be the JSON serialization of one Paimon `Predicate` and must
 not exceed 60 KiB in UTF-8. The server validates field references and returns a
 canonical representation. JSON formatting and object-key ordering alone do not
@@ -73,6 +95,12 @@ A definitively rejected initial create (including HTTP 409 or 403) does not
 adopt an existing policy, even if its content matches. Import it explicitly to
 establish Terraform ownership. An uncertain response such as a connection loss
 is reconciled by reading the exact policy identity and content.
+
+A refresh that finds the policy missing removes it from Terraform state; a
+subsequent plan can recreate it. Required attributes cannot be omitted or set
+to `null`. Omitted/null `allow_non_atomic_update` resolves to `false`.
+
+## Import
 
 Import with the URL-query identity printed in `id`:
 

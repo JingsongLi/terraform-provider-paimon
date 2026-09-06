@@ -144,11 +144,18 @@ Use the Go version specified in `go.mod` or a newer compatible version.
 
 ```bash
 make check
+make check-docs
 make test-acceptance
 ```
 
-See [`docs/index.md`](docs/index.md) for the full provider configuration and
-resource notes.
+`make check` includes the documentation schema check. `make check-docs` runs it
+on its own: every registered provider, resource, and data-source field must have
+a reference entry with its actual type, required/optional/computed mode, and
+sensitive flag. Update the reference descriptions when changing defaults,
+validation, or lifecycle behavior; those semantics still require review.
+
+See [`docs/index.md`](docs/index.md) for the provider configuration and links to
+the complete resource and data-source field references.
 
 See the [API contract](docs/api-contract.md) for the current resource model and
 experimental management boundary. Primary keys use `options["primary-key"]`;

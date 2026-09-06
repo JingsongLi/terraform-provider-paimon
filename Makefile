@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: build check check-license fmt fmt-check fmt-terraform test test-acceptance test-acceptance-tofu test-integration test-race validate-examples vet
+.PHONY: build check check-docs check-license fmt fmt-check fmt-terraform test test-acceptance test-acceptance-tofu test-integration test-race validate-examples vet
 
 build:
 	go build ./...
@@ -32,6 +32,9 @@ validate-examples: fmt-terraform
 
 test:
 	go test ./...
+
+check-docs:
+	go test ./internal/provider -run '^TestDocumentationSchema$$' -count=1
 
 test-acceptance:
 	TF_ACC=1 go test -v ./internal/provider -run '^TestAcc'
