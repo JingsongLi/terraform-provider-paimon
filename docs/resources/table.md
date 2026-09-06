@@ -135,6 +135,9 @@ replacement. These changes are rejected by default. Set
 and have accounted for data deletion. This setting controls replacement plans;
 it does not block an explicit destroy or removal of the resource from
 configuration.
+On an existing table, configured `database`, `name`, or `partition_keys` values
+that are unknown during planning also require replacement opt-in: the provider
+cannot establish that they are unchanged until the dependency resolves.
 Configure primary keys using the Java option `options["primary-key"] = "id,tenant"`.
 Paimon trims each comma-separated name and ignores empty entries; order remains
 significant. `primary_keys` is a computed output, not a configuration argument.

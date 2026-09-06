@@ -370,6 +370,78 @@ resource "paimon_table" "events" {
 	require.Zero(t, catalog.tableAlters, "partition changes must replace the table, never alter its schema in place")
 }
 
+func TestAccUnknownTableIdentityRequiresReplacementOptIn(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("set TF_ACC=1 to run Terraform acceptance tests")
+	}
+	for _, test := range []struct {
+		attribute, before, after string
+	}{
+		{"partition_keys", `["tenant"]`, `["region"]`},
+		{"name", `"events"`, `"renamed"`},
+		{"database", `"analytics"`, `"other"`},
+	} {
+		t.Run(test.attribute, func(t *testing.T) {
+			catalog := &acceptanceCatalog{database: &client.Database{Name: "analytics", Options: map[string]string{}}}
+			server := httptest.NewServer(catalog)
+			defer server.Close()
+			config := func(input string, allowed bool) string {
+				database, name, keys := `"analytics"`, `"events"`, `["tenant"]`
+				switch test.attribute {
+				case "database":
+					database = "terraform_data.identity.output"
+				case "name":
+					name = "terraform_data.identity.output"
+				case "partition_keys":
+					keys = "terraform_data.identity.output"
+				}
+
+				return fmt.Sprintf(`
+provider "paimon" { uri = %q }
+resource "terraform_data" "identity" { input = %s }
+resource "paimon_table" "events" {
+ database = %s
+ name = %s
+ fields = [{name="tenant",type="STRING"},{name="region",type="STRING"}]
+ partition_keys = %s
+ allow_replacement = %t
+}
+`, server.URL, input, database, name, keys, allowed)
+			}
+			initial := config(test.before, false)
+			accresource.Test(t, accresource.TestCase{
+				ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+				Steps: []accresource.TestStep{
+					{
+						Config: initial,
+						Check: accresource.ComposeTestCheckFunc(
+							accresource.TestCheckResourceAttr("paimon_table.events", "id", "database=analytics&table=events"),
+							accresource.TestCheckResourceAttr("paimon_table.events", "partition_keys.0", "tenant"),
+						),
+					},
+					{Config: initial, PlanOnly: true},
+					{
+						Config:      config(test.after, false),
+						ExpectError: regexp.MustCompile("Destructive table change is disabled"),
+					},
+					{Config: initial, PlanOnly: true},
+					{
+						Config:             config(test.after, true),
+						PlanOnly:           true,
+						ExpectNonEmptyPlan: true,
+						ConfigPlanChecks: accresource.ConfigPlanChecks{PostApplyPreRefresh: []plancheck.PlanCheck{
+							plancheck.ExpectResourceAction("paimon_table.events", plancheck.ResourceActionDestroyBeforeCreate),
+						}},
+					},
+				},
+			})
+			require.Equal(t, 1, catalog.tableCreates, "an unknown identity must not bypass replacement opt-in")
+			require.Equal(t, 1, catalog.tableDeletes, "only the test's final destroy may delete the table")
+			require.Zero(t, catalog.tableAlters, "rejected or plan-only changes must not alter the table")
+		})
+	}
+}
+
 func TestFieldDefaultConstantsAndRemoval(t *testing.T) {
 	ctx := context.Background()
 	for _, test := range []struct{ kind, value string }{{"BIGINT", "42"}, {"BOOLEAN", "true"}, {"DATE", "2026-01-02"}, {"STRING", ""}, {"STRING", "NULL"}, {"STRING", "1 + 2"}, {"STRING", "CURRENT_TIMESTAMP"}} {

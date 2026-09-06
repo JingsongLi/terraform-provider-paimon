@@ -145,13 +145,15 @@ func (r *tableResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanR
 	if !plan.PrimaryKeys.IsUnknown() && !state.PrimaryKeys.Equal(plan.PrimaryKeys) {
 		replacementPaths = append(replacementPaths, path.Root("options").AtMapKey("primary-key"))
 	}
-	if !plan.PartitionKeys.IsUnknown() && !state.PartitionKeys.Equal(plan.PartitionKeys) {
+	// Unknown identity and partition values may differ from the current table.
+	// Keep their replacement decision behind the same opt-in as known changes.
+	if !state.PartitionKeys.Equal(plan.PartitionKeys) {
 		replacementPaths = append(replacementPaths, path.Root("partition_keys"))
 	}
-	if !plan.Name.IsUnknown() && !state.Name.Equal(plan.Name) {
+	if !state.Name.Equal(plan.Name) {
 		replacementPaths = append(replacementPaths, path.Root("name"))
 	}
-	if !plan.Database.IsUnknown() && !state.Database.Equal(plan.Database) {
+	if !state.Database.Equal(plan.Database) {
 		replacementPaths = append(replacementPaths, path.Root("database"))
 	}
 	if len(replacementPaths) > 0 {

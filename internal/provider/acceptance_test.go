@@ -262,6 +262,7 @@ type acceptanceCatalog struct {
 	table            *client.Table
 	databaseCreates  int
 	tableCreates     int
+	tableDeletes     int
 	tableAlters      int
 	nextTableFieldID int
 }
@@ -390,6 +391,7 @@ func (c *acceptanceCatalog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.table.SchemaID++
 		w.WriteHeader(http.StatusOK)
 	case r.URL.Path == "/v1/catalog/databases/analytics/tables/events" && r.Method == http.MethodDelete:
+		c.tableDeletes++
 		c.table = nil
 		w.WriteHeader(http.StatusNoContent)
 	default:

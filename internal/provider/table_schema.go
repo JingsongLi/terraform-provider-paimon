@@ -30,7 +30,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -64,6 +63,8 @@ func tableFieldAttrTypes() map[string]attr.Type {
 }
 
 func tableResourceAttributes() map[string]rschema.Attribute {
+	// ModifyPlan handles identity and partition replacement together with the
+	// allow_replacement guard, including when configured values are unknown.
 	return map[string]rschema.Attribute{
 		"id": rschema.StringAttribute{
 			Description:   "Stable URL-query identifier for the table identity.",
@@ -76,14 +77,12 @@ func tableResourceAttributes() map[string]rschema.Attribute {
 			PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 		},
 		"database": rschema.StringAttribute{
-			Description:   "Database containing the table.",
-			Required:      true,
-			PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+			Description: "Database containing the table.",
+			Required:    true,
 		},
 		"name": rschema.StringAttribute{
-			Description:   "Table name.",
-			Required:      true,
-			PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+			Description: "Table name.",
+			Required:    true,
 		},
 		"fields": rschema.ListNestedAttribute{
 			Description:  "Ordered table fields. Supported Paimon schema changes are applied in place using stable field IDs.",
@@ -91,12 +90,11 @@ func tableResourceAttributes() map[string]rschema.Attribute {
 			NestedObject: rschema.NestedAttributeObject{Attributes: tableFieldResourceAttributes()},
 		},
 		"partition_keys": rschema.ListAttribute{
-			Description:   "Ordered partition key field names.",
-			Optional:      true,
-			Computed:      true,
-			ElementType:   types.StringType,
-			Validators:    []validator.List{listvalidator.NoNullValues()},
-			PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplaceIfConfigured()},
+			Description: "Ordered partition key field names.",
+			Optional:    true,
+			Computed:    true,
+			ElementType: types.StringType,
+			Validators:  []validator.List{listvalidator.NoNullValues()},
 		},
 		"primary_keys": rschema.ListAttribute{
 			Description: "Primary key field names returned by Paimon. Configure primary keys with options[\"primary-key\"], using comma-separated field names.",
