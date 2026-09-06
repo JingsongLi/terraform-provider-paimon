@@ -54,30 +54,47 @@ func TestDocumentationSchema(t *testing.T) {
 			_, section, _ := strings.Cut(text, "<!-- schema:begin -->")
 			section, _, found := strings.Cut(section, "<!-- schema:end -->")
 			require.True(t, found)
-			actual := make(map[string]documentedAttribute)
-			for _, line := range strings.Split(section, "\n") {
-				if !strings.HasPrefix(line, "| `") {
-					continue
-				}
-				columns := strings.Split(strings.Trim(line, "|"), "|")
-				require.Len(t, columns, 5, "schema rows have attribute, type, mode, sensitive and meaning columns")
-				for i := range columns {
-					columns[i] = strings.Trim(strings.TrimSpace(columns[i]), "`")
-				}
-				require.NotEmpty(t, columns[4], "every attribute needs a meaning/default description")
-				_, duplicate := actual[columns[0]]
-				require.False(t, duplicate, "duplicate documented attribute: %s", columns[0])
-				actual[columns[0]] = documentedAttribute{Type: columns[1], Mode: columns[2], Sensitive: columns[3]}
-			}
 			require.Empty(t, schema.Block.BlockTypes, "document new nested blocks explicitly before extending this check")
 			expected := make(map[string]documentedAttribute)
 			collectDocumentedAttributes(t, schema.Block.Attributes, "", expected)
-			require.Equal(t, expected, actual, "update docs/%s to match the public schema", page)
+			// Exercise both checkout formats on every OS, including Unix runners.
+			section = strings.ReplaceAll(section, "\r\n", "\n")
+			for name, document := range map[string]string{
+				"LF":   section,
+				"CRLF": strings.ReplaceAll(section, "\n", "\r\n"),
+			} {
+				t.Run(name, func(t *testing.T) {
+					actual := parseDocumentedAttributes(t, document)
+					require.Equal(t, expected, actual, "update docs/%s to match the public schema", page)
+				})
+			}
 		})
 	}
 }
 
 type documentedAttribute struct{ Type, Mode, Sensitive string }
+
+func parseDocumentedAttributes(t *testing.T, section string) map[string]documentedAttribute {
+	t.Helper()
+	attributes := make(map[string]documentedAttribute)
+	for _, line := range strings.Split(section, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "| `") {
+			continue
+		}
+		columns := strings.Split(strings.Trim(line, "|"), "|")
+		require.Len(t, columns, 5, "schema rows have attribute, type, mode, sensitive and meaning columns")
+		for i := range columns {
+			columns[i] = strings.Trim(strings.TrimSpace(columns[i]), "`")
+		}
+		require.NotEmpty(t, columns[4], "every attribute needs a meaning/default description")
+		_, duplicate := attributes[columns[0]]
+		require.False(t, duplicate, "duplicate documented attribute: %s", columns[0])
+		attributes[columns[0]] = documentedAttribute{Type: columns[1], Mode: columns[2], Sensitive: columns[3]}
+	}
+
+	return attributes
+}
 
 func collectDocumentedAttributes(t *testing.T, attributes []*tfprotov6.SchemaAttribute, prefix string, result map[string]documentedAttribute) {
 	t.Helper()
